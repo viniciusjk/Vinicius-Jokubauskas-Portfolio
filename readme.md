@@ -4,6 +4,8 @@ This portfolio includes code from small projects until final projects for gradua
 
 ## Deep Learning Projects
 
+- [**Bilingual models for better cross-lingual transfer**](./deep_learning_cross_lingual_transfer/): This is the final project for the post-graduation course class Introduction to Deep Learning in UNICAMP
+  
 - [Sentiment Analysis](./deep_learning_sentiment_analysis/): The project was part from a graduation class in the first semester of 2021. It is NLP neural net for sentiment analysis
 
 ## Misc. Projects
