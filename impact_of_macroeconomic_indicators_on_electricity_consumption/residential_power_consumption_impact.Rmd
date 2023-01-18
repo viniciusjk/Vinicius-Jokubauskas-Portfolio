@@ -1,0 +1,1430 @@
+---
+title: "ipca_residential_consumption"
+author: "VInicius Jokubauskas"
+date: "2022-08-15"
+output:
+  html_document: 
+    toc: yes
+    keep_md: yes
+    theme: paper
+    df_print: default
+  word_document: default
+  pdf_document: default
+---
+
+# Impact on residential power consumption
+
+## Loading libraries
+
+```{r message=FALSE, warning=FALSE}
+source('libs.R')
+source('personal_library.R')
+```
+
+## Helper functions
+
+### Testing linear fit + stepwise k
+
+-   This function automates some tests that are going to be used throughout all models
+-   The k constant is going to be used in all of the stepwise methods applied
+
+```{r}
+test_linearfit <- function(model, vif_test = F, model_name = 'name'){
+  
+  logLik_ <- logLik(model)
+  summary_model <- summary(model)
+  
+  results <- list(
+    'model_name' = model_name,
+    'f_statistic (<.05)' = pf(summary_model$fstatistic[1], summary_model$fstatistic[2], summary_model$fstatistic[3], lower.tail = F)%>% as.character() %>% as.double(),
+    'rsquared' = summary_model$r.squared,
+    'r.adjusted' = summary_model$adj.r.squared,
+    'normality_test_p' = sf.test(model$residuals)$p.value,
+    'brusch_pagan_p(>.05)' = ols_test_breusch_pagan(model)$p,
+    'logLik' = logLik_
+    
+  )
+  
+  print(summary_model)
+  
+  if (vif_test){
+    print(model %>% ols_vif_tol())
+  }
+  return(results)
+}
+
+
+
+unioun_lists <- function(lists){
+  
+  
+  if (typeof(lists) != 'list'){
+  print ('Input type should be a list of lists')
+
+  }
+  
+  
+  else{
+  df <- data.frame()
+  
+  
+  for (i in lists){
+    df <- df %>% union_all(as.data.frame(i))
+  }
+  
+  return (df)
+  }
+}
+
+
+step_wise_k <-  3.841459
+
+```
+
+### Lag columns
+
+-   This function lags the select columns by the specified number of periods (lag_size)
+
+```{r}
+lag_columns <- function(origin_df, columns, lag_size = 1){
+  
+  new_df <-  data.frame(origin_df)
+  for (i in columns){
+    
+    new_df[,i] <- lag(new_df[,i], lag_size)
+    
+    
+  }
+  
+  return (new_df)
+    
+}
+```
+
+### PIB Data
+
+-   Helps to get tidy data from the IBGE API
+
+```{r}
+get_pib_data <- function(url){
+  
+  raw_data <- jsonlite::fromJSON(url)
+  data <- (raw_data[[4]][[1]])[[2]][[1]]$serie
+  data <- data %>% 
+    pivot_longer(
+      colnames(data),
+      names_to = 'year',
+      values_to = 'pib'
+    ) %>% 
+    mutate(
+      pib = as.numeric(pib))
+  
+  return(data)
+  
+  
+}
+
+```
+
+## Reading and tidying power consumption Data
+
+```{r}
+power_consumption <- read.csv('./anuario-estatistico-de-energia-eletrica/dados-anuario.csv', sep=';')
+```
+
+### Converting char data to float
+
+```{r}
+power_consumption[, c('Consumidores')] <- power_consumption[, c('Consumidores')] %>% 
+  str_replace_all(',(?=\\d)','.') %>% as.double
+power_consumption[, c('Consumo')] <- power_consumption[, c('Consumo')] %>% 
+  str_replace_all(',(?=\\d)','.') %>% as.double
+```
+
+### Converting char data to Date
+
+```{r}
+power_consumption$Data <- power_consumption$Data %>%
+  as.character %>%
+  strptime('%Y%m%d') %>%
+  as.Date()
+```
+
+### Grouping date
+
+```{r}
+power_consumption <- power_consumption %>% mutate(
+  year = year(Data),
+  year_month = yearmonth(Data),
+  year_quarter = yearquarter(Data)
+)
+```
+
+### Creating a new Region Column
+
+```{r}
+power_consumption$region <- power_consumption$UF %>%
+  str_replace_all('(AL|BA|PB|PE|PI|RN|SE|CE|MA)', 'NE') %>% 
+  str_replace_all('(ES|SP|MG|RJ)', 'SE') %>% 
+  str_replace_all('(TO|AC|AM|AP|RO|RR|PA)', 'N') %>% 
+  str_replace_all('(MT|MS|DF|GO)', 'CO') %>% 
+  str_replace_all('(PR|RS|SC)', 'S')
+```
+
+### Converting char data to factor
+
+```{r}
+
+power_consumption %>% map(class)->columns_classes
+power_consumption[columns_classes[columns_classes=='character'] %>% names] <- power_consumption[columns_classes[columns_classes=='character'] %>% names] %>% as_factor()
+
+     
+
+
+power_consumption %>% mutate(
+  UF = as.factor(UF),
+  Sistema=as.factor(Sistema),
+  TipoConsumidor = as.factor(TipoConsumidor),
+  SetorN1 = as.factor(SetorN1),
+  SetorN2 = as.factor(SetorN2),
+  TensaoN1 = as.factor(TensaoN1),
+  TensaoN2 = as.factor(TensaoN2),
+  TensaoN3 = as.factor(TensaoN3),
+  FaixaDeConsumoN1 = as.factor(FaixaDeConsumoN1),
+  FaixaDeConsumoN2 = as.factor(FaixaDeConsumoN2),) ->power_consumption
+
+power_consumption %>% pretty_sample_show()
+
+```
+
+## Power Consumption Overview
+
+```{r}
+power_consumption %>% select(-year_month, -year_quarter)  %>% summary
+```
+
+### Creating new grouped datasets
+
+#### Grouping power consumption by state
+
+```{r}
+power_consumption %>% 
+  group_by(UF) %>% 
+  summarise(total = sum(Consumo)) -> consumption_uf
+
+consumption_uf %>% pretty_sample_show()
+```
+
+#### Grouping consumption by month
+
+```{r}
+
+monthly_consumption <- power_consumption %>% group_by(year_month) %>% 
+  summarise(total=sum(Consumo))
+
+monthly_consumption %>% pretty_head_show()
+```
+
+#### Grouping consumption by quarter
+
+```{r}
+quartely_consumption <- power_consumption %>% group_by(year_quarter) %>% 
+  summarize(total=sum(Consumo))
+quartely_consumption %>% pretty_head_show()
+```
+
+#### Grouping consumption by year
+
+```{r}
+yearly_consumption <- power_consumption %>% group_by(year) %>% 
+  summarize(total=sum(Consumo))
+yearly_consumption %>% pretty_head_show()
+```
+
+#### Grouping by year_month and sector
+
+```{r}
+power_consumption_sector <- power_consumption %>% group_by(year_month,SetorN1, SetorN2 ) %>% 
+  summarise(total=sum(Consumo)) %>% ungroup
+
+power_consumption_sector %>% pretty_sample_show()
+```
+
+## IPCA Data
+
+```{r}
+ipca <- read.csv('http://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados?formato=csv', sep=';')
+
+ipca %>% pretty_sample_show()
+
+```
+
+### Transforming the date input from char to Date
+
+```{r}
+
+ipca <- ipca %>% mutate(
+  valor = valor %>% 
+    str_replace(',','.') %>% 
+    as.numeric(),
+  data = data %>% yearmonth(format='%d-%m-%Y')
+) %>% 
+  dplyr::rename(
+    valor_ipca = valor
+  )
+
+```
+
+### Grouping by periods
+
+```{r}
+
+ipca['ipca_3'] <- bind_rows(
+  list('ipca_3' = c(1:2)*NA),
+  list('ipca_3' = rollapply((ipca$valor_ipca/100 + 1), 3, prod))) * 100 -100
+ipca['ipca_12'] <- bind_rows(
+  list('ipca_12' = c(1:11)*NA),
+  list('ipca_12' = rollapply((ipca$valor_ipca/100 + 1), 12, prod))) * 100 -100
+ipca['ipca_24'] <- bind_rows(
+  list('ipca_24' = c(1:23)*NA),
+  list('ipca_24' = rollapply((ipca$valor_ipca/100 + 1), 24, prod))) * 100 -100
+ipca['ipca_36'] <- bind_rows(
+  list('ipca_36' = c(1:35)*NA),
+  list('ipca_36' = rollapply((ipca$valor_ipca/100 + 1), 36, prod))) * 100 -100
+
+```
+
+### Filtering from Jan 2000 to Dec 2021
+
+```{r}
+
+ipca <- ipca %>% filter(
+  data %in% c(yearmonth('2000-01-01'):yearmonth('2022-12-31'))
+)
+```
+
+### IPCA Overview
+
+```{r}
+ipca %>% mutate(data=as.Date(data)) %>% summary
+
+```
+
+### Visualizing data
+
+#### Accumulated IPCA by different time windows
+
+```{r}
+
+
+ipca %>% ggplot(aes(x=data)) +
+  geom_line(aes(y=ipca_3,color='IPCA Accumulated in 3 months')) + 
+  geom_line(aes(y=ipca_12,color='IPCA Accumulated in 12 months')) +
+  geom_line(aes(y=ipca_24,color='IPCA Accumulated in 24 months')) +
+  geom_line(aes(y=ipca_36,color='IPCA Accumulated in 36 months')) +
+  xlab('Year-Month') +
+  labs(color='IPCA', title = 'Accumulated IPCA') +
+  ylab('IPCA Value (%)')
+
+
+
+
+
+```
+
+#### Average IPCA by different time windows
+
+```{r}
+
+ipca %>% ggplot(aes(x=data)) +
+  geom_line(aes(y=((ipca_12/100 + 1) ^(1/12))*100-100, color = 'ipca_12') ) +
+  geom_line(aes(y=((ipca_3/100 + 1) ^(1/3))*100-100, color='ipca_3')) + 
+  geom_line(aes(y=((ipca_24/100 + 1) ^(1/24))*100-100, color='ipca_24')) +
+  geom_line(aes(y=((ipca_36/100 + 1) ^(1/36))*100-100, color='ipca_36')) +
+  xlab('Mes') +
+  ylab('Inflacao Media no Periodo') +
+  labs(color='IPCA')
+  
+
+
+```
+
+## Selic
+
+API Base link: <http://api.bcb.gov.br/dados/serie/bcdata.sgs.1178/dados?formato=csv>
+
+```{r}
+selic_url_yearly <- 'http://api.bcb.gov.br/dados/serie/bcdata.sgs.1178/dados?formato=csv'
+
+selic_yearly <- read.csv(selic_url_yearly, sep=';')
+
+
+
+selic_yearly <- selic_yearly %>% 
+  mutate(valor = as.numeric(str_replace(valor, ',','.')),
+         data = as.Date(data, format='%d/%m/%Y')) %>% 
+  dplyr::rename(
+    valor_selic = valor
+  )
+
+selic_monthly_url <- 'http://api.bcb.gov.br/dados/serie/bcdata.sgs.4390/dados?formato=csv'
+
+
+selic_monthly <- read.csv(selic_monthly_url, sep=';')
+
+
+
+selic_monthly <- selic_monthly %>% mutate(
+  valor = as.numeric(str_replace(valor, ',','.')),
+         data = as.Date(data, format='%d/%m/%Y'))%>% 
+  dplyr::rename(
+    valor_selic = valor
+  )
+
+```
+
+### Selic Overview
+
+```{r}
+selic_monthly %>% summary
+```
+
+### Accumulating Selic
+
+```{r}
+selic_monthly['selic_36'] <- bind_rows(
+  list('selic_36' = c(1:35)*NA),
+  list('selic_36' = rollapply((selic_monthly$valor_selic/100 + 1), 36, prod))) * 100 -100
+selic_monthly['selic_03'] <- bind_rows(
+  list('selic_03' = c(1:2)*NA),
+  list('selic_03' = rollapply((selic_monthly$valor_selic/100 + 1), 03, prod))) * 100 -100
+selic_monthly['selic_12'] <- bind_rows(
+  list('selic_12' = c(1:11)*NA),
+  list('selic_12' = rollapply((selic_monthly$valor_selic/100 + 1), 12, prod))) * 100 -100
+selic_monthly['selic_24'] <- bind_rows(
+  list('selic_24' = c(1:23)*NA),
+  list('selic_24' = rollapply((selic_monthly$valor_selic/100 + 1), 24, prod))) * 100 -100
+
+selic_monthly %>% relocate(selic_36, .after=selic_24) -> selic_monthly
+
+  selic_monthly <- selic_monthly %>% mutate(
+    year_month= yearmonth(data)
+  )
+
+
+selic_monthly %>% pretty_sample_show()
+```
+### Visualizing Data
+
+```{r}
+
+
+
+
+selic_monthly %>% 
+  filter(data>=as.Date("2010-01-01") & data<=as.Date('2019-12-31')) %>% 
+  ggplot(aes(x=year_month)) +
+  geom_line(aes(y=selic_03, col='Selic Accumulated in 3 months'))+
+  geom_line(aes(y=selic_12, col='Selic Accumulated in 12 months'))+
+  geom_line(aes(y=selic_24, col='Selic Accumulated in 24 months'))+
+  geom_line(aes(y=selic_36, col='Selic Accumulated in 36 months')) +
+  xlab('Year-Month') +
+  labs(color='Selic', title = 'Accumulated Selic') +
+  ylab('Selic Value (%)')
+
+```
+
+## PIB Data
+
+### Quarterly current adjusted values
+
+```{r}
+
+pib_url_quarter <- 'https://servicodados.ibge.gov.br/api/v3/agregados/2072/periodos/200001|200002|200003|200004|200101|200102|200103|200104|200201|200202|200203|200204|200301|200302|200303|200304|200401|200402|200403|200404|200501|200502|200503|200504|200601|200602|200603|200604|200701|200702|200703|200704|200801|200802|200803|200804|200901|200902|200903|200904|201001|201002|201003|201004|201101|201102|201103|201104|201201|201202|201203|201204|201301|201302|201303|201304|201401|201402|201403|201404|201501|201502|201503|201504|201601|201602|201603|201604|201701|201702|201703|201704|201801|201802|201803|201804|201901|201902|201903|201904|202001|202002|202003|202004|202101|202102|202103|202104/variaveis/933?localidades=N1[all]'
+
+quarter_pib <- get_pib_data(pib_url_quarter)
+
+quarter_pib$year <- paste0(
+  quarter_pib$year %>% str_match('\\d{4}'),
+  '-',
+  quarter_pib$year %>%
+    str_match('(?<=\\d{4})\\d{2}') %>% 
+    str_replace('04', '12') %>% 
+    str_replace('03', '09') %>% 
+    str_replace('02', '06') %>% 
+    str_replace('01', '03')
+  )
+
+quarter_pib <- quarter_pib %>% 
+  mutate(
+    year= year %>% yearquarter()
+  )
+
+
+quarter_pib %>% write.csv2('test.csv'
+                          )
+
+```
+
+### Acummulated data
+
+```{r}
+quarter_pib['pib_12_months'] <- quarter_pib$pib %>% rollmean(k=4, na.pad = T, align = 'right')
+quarter_pib['pib_24_months'] <- quarter_pib$pib %>% rollmean(k=8, na.pad = T, align = 'right')
+quarter_pib['pib_36_months'] <- quarter_pib$pib %>% rollmean(k=12, na.pad = T, align = 'right')
+```
+
+### Visualizing pib data
+
+```{r}
+
+quarter_pib %>%
+  pivot_longer(cols=c('pib', 'pib_12_months', 'pib_24_months',  'pib_36_months')) %>% 
+  ggplot() + 
+  geom_line(aes(x=year, y= value, col=name))
+
+
+```
+
+## Temperature data
+
+### Reading and tidying temperature data
+
+```{r}
+temperature_data <- read.csv(unzip('./data/temperature.zip'))
+
+
+
+temperature_data %>% slice_sample(n=20)
+
+temperature_data <- temperature_data %>% mutate(
+  year.month = yearmonth(year.month),
+  day=  as_date(day),
+  region = as.factor(region),
+  state = as.factor(state),
+  city = as.factor(city) ) 
+
+temperature_data <- temperature_data %>%   dplyr::rename(
+    mean_temp = mean,
+    median_temp  = median,
+    max_temp = amax)
+
+temperature_data %>% select(-year.month) %>%  summary
+```
+
+### Getting weights for weighted mean temperature
+
+-   The weights to calculate the average temperature will come from the proportional power consumption by month and region. That means that the regions where there is more power consumption will have more impact on the average temperature since we want to study the impact of the temperature on the total power consumption for the residential sector.
+-   We will also have a normal average, without weighting by power consumption
+
+```{r}
+power_consumption_by_region_residential <- power_consumption %>%
+  filter(SetorN1 == 'Residencial') %>%
+  group_by(year_month, region) %>% 
+  summarise(total=sum(Consumo)) %>% 
+  group_by(year_month) %>% 
+  mutate(percentage = total/sum(total),
+         total_percent = sum(percentage))
+
+
+power_consumption_by_region_general <- power_consumption %>%
+  group_by(year_month, region) %>% 
+  summarise(total=sum(Consumo)) %>% 
+  group_by(year_month) %>% 
+  mutate(percentage = total/sum(total),
+         total_percent = sum(percentage))
+
+power_consumption_by_region_residential %>% pretty_head_show(5)
+power_consumption_by_region_general %>% pretty_head_show(5)
+
+```
+
+#### Grouping temperature by month and region
+
+```{r}
+temperature_data_summary <- temperature_data %>% group_by( year.month,region) %>% 
+  summarise(max_temp = max(max_temp),
+            mean_temp = mean(mean_temp),
+            )
+temperature_data_summary %>% pretty_head_show()
+```
+
+#### Visualizing mean temperature by region
+
+```{r}
+
+temperature_data_summary %>%
+  ggplot(aes(x=year.month, y=mean_temp))+
+  geom_line()+
+  geom_line(aes(y=max_temp, colour='max'))+
+  facet_wrap(~region)
+
+
+
+```
+
+#### Creating a unique ID to merge both datasets
+
+```{r}
+temperature_data_summary <- temperature_data_summary %>% 
+  mutate(unique_key = paste0(year.month %>% as.character(),  '-', region))
+
+
+power_consumption_by_region_residential <- power_consumption_by_region_residential %>% 
+  mutate(unique_key = paste0( year_month %>% as.character(),    '-',    region   ))
+
+power_consumption_by_region_general <- power_consumption_by_region_general %>% 
+  mutate(unique_key = paste0( year_month %>% as.character(),    '-',    region   ))
+         
+temperature_data_summary <- temperature_data_summary %>% ungroup() %>% select(mean_temp, max_temp,unique_key)
+
+
+```
+
+#### Merging datasets
+
+```{r}
+temperature_data_summary_weighted_residential <- power_consumption_by_region_residential %>%
+  select(-total, -total_percent) %>% 
+  left_join(temperature_data_summary, by='unique_key') %>% 
+  relocate(unique_key)
+
+temperature_data_summary_weighted_general <- power_consumption_by_region_general %>%
+  select(-total, -total_percent) %>% 
+  left_join(temperature_data_summary, by='unique_key') %>% 
+  relocate(unique_key)
+
+temperature_data_summary_weighted_residential %>% pretty_head_show()
+temperature_data_summary_weighted_general %>% pretty_head_show()
+
+
+```
+
+#### Calculating weighted avarages
+
+```{r}
+temperature_data_summary_weighted_residential <- temperature_data_summary_weighted_residential %>% 
+  mutate(weighted_temp = sum(mean_temp * percentage),
+        weighted_temp_max = sum(max_temp * percentage),
+         equal_weight = mean(mean_temp),
+         equal_weight_max = mean(max_temp)
+         )
+
+temperature_data_summary_weighted_general <- temperature_data_summary_weighted_general %>% 
+  mutate(weighted_temp = sum(mean_temp * percentage),
+         weighted_temp_max = sum(max_temp * percentage),
+         equal_weight = mean(mean_temp),
+          equal_weight_max = mean(max_temp))
+```
+
+```{r}
+temperature_data_summary_weighted_residential %>% filter(region=='N') %>% 
+  ggplot(aes(x=year_month, y=weighted_temp)) + 
+  geom_line(aes(col='weighted')) +
+  geom_line(aes(y=weighted_temp_max, col='max_weighted')) +
+  geom_line(aes(y=equal_weight, col='equal weights')) +
+  geom_line(aes(y=equal_weight_max, col='equal weights max')) +
+  labs(title='Residential Temperature Weigthed')
+
+temperature_data_summary_weighted_general %>% filter(region=='N') %>% 
+  ggplot(aes(x=year_month, y=weighted_temp)) + 
+  geom_line(aes(col='weighted')) +
+  geom_line(aes(y=weighted_temp_max, col='max_weighted')) +
+  geom_line(aes(y=equal_weight, col='equal weights')) +
+  geom_line(aes(y=equal_weight_max, col='equal weights max')) +
+  labs(title='General Temperature Weigthed')
+
+
+temperature_data_summary_weighted_residential %>%
+  filter(region=='N') %>% 
+  ggplot(aes(x=year_month, y=weighted_temp)) +
+  geom_line(aes(col='weighted_residential')) +
+  geom_line(data=temperature_data_summary_weighted_general, aes(y=weighted_temp, col='weighted_general')) +
+  geom_line(aes(y=equal_weight, col='equal weights')) + 
+  geom_line(aes(y=weighted_temp_max, col='weighted_residential_max')) + 
+  geom_line(data=temperature_data_summary_weighted_general, aes(y=weighted_temp_max, col='weighted_general_max')) +
+  geom_line(aes(y=equal_weight_max, col='equal weights max')) +
+  labs(title='Comparing the averages and max')
+
+
+
+```
+
+## Recursos Livres
+
+### Recursos Livres totais
+
+**Operações de crédito - concessões de crédito - recursos livres**
+
+**Frequência**: Mensal de 2011.03 até 2022.04
+
+**Fonte**: Banco Central do Brasil, Notas Econômico-financeiras para a Imprensa, Política Monetária e Operações de Crédito do SFN (Bacen/Notas Imprensa/Moeda)
+
+**Unidade**: R\$ (milhões)
+
+**Comentário**: Estatísticas das operações de crédito do Sistema Financeiro Nacional. Concessões de crédito refere-se a desembolsos referentes a empréstimos e financiamentos efetivamente creditados ao tomador do crédito. Os valores informados correspondem às concessões ocorridas no mês de referênciaEstas novas operações de crédito são contratadas com taxas de juros livremente pactuadas entre mutuários e instituições financeiras. Não inclui operações referenciadas em taxas regulamentadas, operações vinculadas a recursos do Banco Nacional de Desenvolvimento Econômico e Social (BNDES) ou quaisquer outras lastreadas em recursos compulsórios ou governamentais.Mais informações: [GLOSSÁRIO](http://ipeadata.gov.br/doc/glossariocredito.pdf); [Nota para a Imprensa de Política Monetária e Operações de Crédito](http://ipeadata.gov.br/doc/notaempr.pdf); [Nota Metodológica -- Revisão da estrutura de dados de crédito -- Fevereiro de 2015](http://ipeadata.gov.br/doc/notaempr201502.pdf) e SGS- Sistema de Gerenciamento de Séries Temporais, Banco Central.
+
+**Atualizado em:** 27/07/2022
+
+---
+
+**Operações de crédito - concessões de crédito - recursos livres**
+
+**Frequency**: Monthly from 2011.03 until 2022.04
+
+**Source**: Banco Central do Brasil, Notas Econômico-financeiras para a Imprensa, Política Monetária e Operações de Crédito do SFN (Bacen/Notas Imprensa/Moeda)
+
+**Unit**: R\$ (milhões)
+
+**Comments**: Statistics of credit operations of the National Financial System. Credit grants refer to disbursements related to loans and financing effectively credited to the credit borrower. The reported values correspond to grants that occurred in the reference month. These new credit operations are contracted with interest rates freely agreed upon between borrowers and financial institutions. It does not include operations referenced in regulated rates, operations linked to resources of the National Bank for Economic and Social Development (BNDES), or any other operations backed by compulsory or government resources. For more information: [GLOSSÁRIO](http://ipeadata.gov.br/doc/glossariocredito.pdf); [Nota para a Imprensa de Política Monetária e Operações de Crédito](http://ipeadata.gov.br/doc/notaempr.pdf); [Nota Metodológica -- Revisão da estrutura de dados de crédito -- Fevereiro de 2015](http://ipeadata.gov.br/doc/notaempr201502.pdf) e SGS- Sistema de Gerenciamento de Séries Temporais, Banco Central.
+
+**Last updated on:** 27/07/2022
+
+```{r}
+recursos_livres_totais <- read.csv('./data/ipea_data_concessao_credito/recursos_livres_total.csv', dec='p')
+
+
+recursos_livres_totais %>% pretty_sample_show()
+
+recursos_livres_totais <- recursos_livres_totais[,1:2] %>%
+  drop_na() %>%
+  dplyr::rename(
+    date = data)
+
+recursos_livres_totais <- recursos_livres_totais %>% 
+  mutate( date = yearmonth(as.character(date)))
+
+recursos_livres_totais %>% plot
+
+recursos_livres_totais$credit_mean_12 <- recursos_livres_totais$credit %>% rollmean(k=12, na.pad = T, align = 'right')
+recursos_livres_totais$credit_mean_24 <- recursos_livres_totais$credit %>% rollmean(k=24, na.pad = T, align = 'right')
+recursos_livres_totais$credit_mean_36 <- recursos_livres_totais$credit %>% rollmean(k=36, na.pad = T, align = 'right')
+
+
+recursos_livres_totais %>% 
+  pivot_longer(cols = c('credit_mean_12', 'credit_mean_24', 'credit_mean_36', 'credit')) %>% 
+  ggplot(aes(x=date, y=value))+
+  geom_line(aes(col=name))
+
+
+```
+
+#### Recursos livres totais with no inflation
+
+-   It was noted that inflation was affecting the values, because of that we factored inflation in
+
+```{r}
+
+recursos_livres_totais_current <- recursos_livres_totais %>% 
+  left_join(ipca, by=c('date'='data')) %>% 
+  select(date, credit, valor_ipca)
+
+
+acc_inflation <- (recursos_livres_totais_current$valor/100 + 1) %>% rev() %>% lag(1) %>% na.fill(1) %>% cumprod() 
+
+
+credit_rev <- recursos_livres_totais_current$credit %>% rev
+
+adjusted_values <- acc_inflation*credit_rev
+
+recursos_livres_totais_current$credit_current <- adjusted_values %>% rev
+recursos_livres_totais_current$acc_inflation <- acc_inflation %>% rev
+
+
+recursos_livres_totais_current$credit_mean_12 <- recursos_livres_totais_current$credit_current %>% rollmean(k=12, na.pad = T, align = 'right')
+recursos_livres_totais_current$credit_mean_24 <- recursos_livres_totais_current$credit_current %>% rollmean(k=24, na.pad = T, align = 'right')
+recursos_livres_totais_current$credit_mean_36 <- recursos_livres_totais_current$credit_current %>% rollmean(k=36, na.pad = T, align = 'right')
+
+
+recursos_livres_totais_current %>% 
+  pivot_longer(cols = c('credit_mean_12', 'credit_mean_24', 'credit_mean_36', 'credit_current')) %>% 
+  ggplot(aes(x=date, y=value))+
+  geom_line(aes(col=name))
+
+
+
+```
+
+```{r}
+```
+
+### Recursos Livres pessoa fisica
+
+**Operações de crédito - concessões de crédito - recursos livres - pessoa física**
+
+**Frequência:** Mensal de 2011.03 até 2022.04
+
+**Fonte:** Banco Central do Brasil, Notas Econômico-financeiras para a Imprensa, Política Monetária e Operações de Crédito do SFN (Bacen/Notas Imprensa/Moeda)
+
+**Unidade:** R\$ (milhões)
+
+**Comentário:** Estatísticas das operações de crédito do Sistema Financeiro Nacional. Concessões de crédito refere-se a desembolsos referentes a empréstimos e financiamentos efetivamente creditados ao tomador do crédito. Os valores informados correspondem às concessões ocorridas no mês de referênciaEstas novas operações de crédito são contratadas com taxas de juros livremente pactuadas entre mutuários e instituições financeiras. Não inclui operações referenciadas em taxas regulamentadas, operações vinculadas a recursos do Banco Nacional de Desenvolvimento Econômico e Social (BNDES) ou quaisquer outras lastreadas em recursos compulsórios ou governamentais.Classificação por tipo de cliente: pessoa física (PF). Mais informações: [GLOSSÁRIO](http://ipeadata.gov.br/doc/glossariocredito.pdf); [Nota para a Imprensa de Política Monetária e Operações de Crédito](http://ipeadata.gov.br/doc/notaempr.pdf); [Nota Metodológica -- Revisão da estrutura de dados de crédito -- Fevereiro de 2015](http://ipeadata.gov.br/doc/notaempr201502.pdf) e SGS- Sistema de Gerenciamento de Séries Temporais, Banco Central.
+
+**Atualizado em:** 27/07/2022
+
+---
+
+**Operações de crédito - concessões de crédito - recursos livres - pessoa física**
+
+**Frequency:** Monthly from 2011.03 until 2022.04
+
+**Source:** Banco Central do Brasil, Notas Econômico-financeiras para a Imprensa, Política Monetária e Operações de Crédito do SFN (Bacen/Notas Imprensa/Moeda)
+
+**Unity:** R\$ (milhões)
+
+**Comments:** Statistics of credit operations of the National Financial System. Credit grants refer to disbursements related to loans and financing effectively credited to the credit borrower. The reported values correspond to grants that occurred in the reference month. These new credit operations are contracted with interest rates freely agreed upon between borrowers and financial institutions. It does not include operations referenced in regulated rates, operations linked to resources of the National Bank for Economic and Social Development (BNDES), or any other operations backed by compulsory or government resources. Classification by type of customer: individual (PF). More information: [GLOSSÁRIO](http://ipeadata.gov.br/doc/glossariocredito.pdf); [Nota para a Imprensa de Política Monetária e Operações de Crédito](http://ipeadata.gov.br/doc/notaempr.pdf); [Nota Metodológica -- Revisão da estrutura de dados de crédito -- Fevereiro de 2015](http://ipeadata.gov.br/doc/notaempr201502.pdf) e SGS- Sistema de Gerenciamento de Séries Temporais, Banco Central.
+
+**Last updated on:** 27/07/2022
+
+
+```{r}
+recursos_livres_pf <- read.csv('./data/ipea_data_concessao_credito/recursos_livres_pf.csv', dec='p')
+recursos_livres_pf <- recursos_livres_pf[,1:2] %>%
+  drop_na() %>%
+  dplyr::rename(
+ date = data)
+
+recursos_livres_pf <- recursos_livres_pf %>% 
+  mutate( date = yearmonth(as.character(date)))
+
+recursos_livres_pf$credit_mean_12 <- recursos_livres_pf$credit %>% rollmean(k=12, na.pad = T, align = 'right')
+recursos_livres_pf$credit_mean_24 <- recursos_livres_pf$credit %>% rollmean(k=24, na.pad = T, align = 'right')
+recursos_livres_pf$credit_mean_36 <- recursos_livres_pf$credit %>% rollmean(k=36, na.pad = T, align = 'right')
+
+
+recursos_livres_pf %>% 
+  pivot_longer(cols = c('credit_mean_12', 'credit_mean_24', 'credit_mean_36', 'credit')) %>% 
+  ggplot(aes(x=date, y=value))+
+  geom_line(aes(col=name))
+
+```
+
+#### Inflation adjusted
+
+```{r}
+recursos_livres_pf_current <- recursos_livres_pf %>% 
+  left_join(ipca, by=c('date'='data')) %>% 
+  select(date, credit, valor_ipca)
+
+
+acc_inflation <- (recursos_livres_pf_current$valor/100 + 1) %>% rev() %>% lag(1) %>% na.fill(1) %>% cumprod() 
+
+
+credit_rev <- recursos_livres_pf_current$credit %>% rev
+
+adjusted_values <- acc_inflation*credit_rev
+
+recursos_livres_pf_current$credit_current <- adjusted_values %>% rev
+recursos_livres_pf_current$acc_inflation <- acc_inflation %>% rev
+
+
+recursos_livres_pf_current$credit_mean_12 <- recursos_livres_pf_current$credit_current %>% rollmean(k=12, na.pad = T, align = 'right')
+recursos_livres_pf_current$credit_mean_24 <- recursos_livres_pf_current$credit_current %>% rollmean(k=24, na.pad = T, align = 'right')
+recursos_livres_pf_current$credit_mean_36 <- recursos_livres_pf_current$credit_current %>% rollmean(k=36, na.pad = T, align = 'right')
+
+
+recursos_livres_pf_current %>% 
+  pivot_longer(cols = c('credit_mean_12', 'credit_mean_24', 'credit_mean_36', 'credit_current')) %>% 
+  ggplot(aes(x=date, y=value))+
+  geom_line(aes(col=name))
+
+
+
+```
+
+## Real Minimum Wage
+
+**Salário mínimo real**
+
+**Frequência:** Mensal de 1940.07 até 2022.07
+
+**Fonte:** [Instituto de Pesquisa Econômica Aplicada](http://www.ipea.gov.br/)
+
+**Unidade:** R\$ (do último mês)
+
+**Comentário:** O Salário mínimo nominal é o menor salário definido por lei para remuneração do trabalhador brasileiro. O salário minimo real é o valor do salário mínimo nominal abatido o percentual de inflação do mês, o qual é medido através de diferentes índices de preço. Nota:
+
+1.  Série em reais (R\$) constantes do último mês, elaborada pelo IPEA, deflacionando-se o salário mínimo nominal pelo Índice Nacional de Preços ao Consumidor (INPC) do IBGE a partir de março de 1979. Para períodos anteriores, os deflatores utilizados foram o IGPC-Mtb (jan/1948-mar/1979), o IPC-RJ/FGV (jan/1944-jan/1948) e o IPC-SP/Fipe (jul/1940-jan/1944).
+
+2.  Em julho de 1994 o deflator sofre um ajuste em função da mudança de unidade monetária de cruzeiros reais para reais. A inflação do INPC em julho foi medida comparando os preços em reais de julho com os preços em cruzeiros reais de junho convertidos para URV (Unidade Real de Valor) no dia em que foram coletados. Já a variação do salário mínimo é medida pelo valor do salário de julho em reais pelo salário de junho em cruzeiros reais convertido pela URV do último dia de junho, e não pela taxa média de junho. Dessa forma, o valor do salário mínimo em reais de junho fica subestimado, e a variação do salário mínimo entre junho e julho é bem maior do que a inflação em reais no mesmo período. Para eliminar esta diferença, a variação do deflator em julho foi multiplicada por 1,23.
+
+3.  O salário mínimo urbano foi instituído no Brasil por decreto-lei do presidente Getúlio Vargas, durante a ditadura do Estado Novo, e começou a vigorar em julho de 1940, com valores diferenciados entre estados e sub-regiões. Em 1943, foi incorporado à Consolidação das Leis do Trabalho (CLT) e, em 1963, foi estendido ao campo por meio do Estatuto do Trabalhador Rural. Foi nacionalmente unificado em maio de 1984, mas, desde 2000, a Lei Complementar 103 permite que os estados fixem pisos estaduais superiores ao mínimo nacional. Os dados desta série para o período em que a legislação federal definia faixas diversificadas referem-se sempre ao maior salário mínimo vigente no país. Quanto ao período anterior à unificação, ver: Mais informações: Constituição Federal (Art. 7º).
+
+**Atualizado em:** 12/08/2022
+
+---
+
+**Real Minimum Wage**
+
+**Frequency:** MOnrhly from 1940.07 until 2022.07
+
+**Source:** [Instituto de Pesquisa Econômica Aplicada](http://www.ipea.gov.br/)
+
+**Unit:** R\$ (From last month)
+
+**Comments:** The nominal minimum wage is the lowest salary defined by law for the remuneration of Brazilian workers. The real minimum wage is the value of the nominal minimum wage minus the percentage of inflation for the month, which is measured through different price indexes. Note:
+1. Series in constant reais (R$) from the last month, prepared by IPEA, deflating the nominal minimum wage by the National Consumer Price Index (INPC) of IBGE from March 1979. For earlier periods, the deflators used were IGPC-Mtb (Jan/1948-Mar/1979), IPC-RJ/FGV (Jan/1944-Jan/1948), and IPC-SP/Fipe (Jul/1940-Jan/1944).
+
+2. In July 1994, the deflator underwent an adjustment due to the change of monetary unit from cruzeiros reais to reais. INPC inflation in July was measured by comparing prices in reais in July with prices in cruzeiros reais in June, converted to URV (Real Value Unit) on the day they were collected. The variation of the minimum wage, on the other hand, is measured by the value of the salary in reais in July by the salary in cruzeiros reais in June converted by the URV of the last day of June, and not by the average rate of June. This way, the value of the minimum wage in reais in June is underestimated, and the variation of the minimum wage between June and July is much higher than inflation in reais in the same period. To eliminate this difference, the variation of the deflator in July was multiplied by 1.23.
+
+3. The urban minimum wage was established in Brazil by a decree-law of President Getúlio Vargas, during the dictatorship of the Estado Novo, and began to take effect in July 1940, with differentiated values between states and subregions. In 1943, it was incorporated into the Consolidation of Labor Laws (CLT) and, in 1963, it was extended to the countryside through the Rural Worker Statute. It was nationally unified in May 1984, but, since 2000, Complementary Law 103 allows states to set higher state floors than the national minimum. The data in this series for the period when federal legislation defined diversified ranges always refer to the highest minimum wage in the country. As for the period before unification, see: More information: Federal Constitution (Art. 7º)
+
+
+**Last updated on:** 12/08/2022
+
+
+
+```{r}
+minimum_wage <- read.csv('./data/ipea_data_salario_minimo_real/minimum_wage.csv', dec='p')
+
+minimum_wage %>% pretty_sample_show()
+minimum_wage <- minimum_wage[,1:2] %>% 
+  dplyr::rename(date = data) %>% 
+  mutate(
+    date = yearmonth(as.character(date)),
+    wages = as.double(wages)
+    
+    )
+
+```
+
+### Visualization
+
+```{r}
+
+
+minimum_wage %>% 
+  filter(date>=as.Date('2010-01-10')) %>% 
+  ggplot(aes(x=date, y=wages))+
+  geom_line(color='blue')+
+  ylim(1020, 1300) 
+
+```
+
+## Modeling Power Consumption
+
+### General impact on power consumption
+
+#### IPCA
+
+```{r}
+
+monthly_consumption_ipca <- monthly_consumption %>% left_join(ipca, by=c('year_month'='data'))
+
+general_ipca_lm <- lm(total ~ . -year_month, data=monthly_consumption_ipca)
+
+general_ipca_lm %>% test_linearfit()
+
+general_ipca_lm.s <- general_ipca_lm %>% step(k=step_wise_k, trace=F)
+
+general_ipca_stats <- general_ipca_lm.s %>% test_linearfit(model_name = 'ipca_gen')
+
+general_ipca_stats
+
+
+
+```
+
+#### Selic
+
+```{r}
+monthly_consumption_selic <- monthly_consumption %>% left_join(selic_monthly %>% select(-data))
+
+general_selic_lm <- lm(total ~. -year_month, data = monthly_consumption_selic)
+
+general_selic_lm %>% test_linearfit()
+
+general_selic_lm.s <- general_selic_lm %>% step(k=step_wise_k, trace=F)
+
+general_selic_stats <- general_selic_lm.s %>% test_linearfit(model_name = 'selic_gen')
+
+general_selic_stats
+
+
+```
+
+#### PIB
+
+```{r}
+quartely_consumption_pib <- quartely_consumption %>% left_join(quarter_pib, by=c('year_quarter'='year'))
+
+
+general_pib_lm <- lm(total ~ . -year_quarter, data=quartely_consumption_pib )
+
+general_pib_lm %>% test_linearfit()
+
+general_pib_lm.s <- general_pib_lm %>% step(k=step_wise_k, trace=F)
+
+general_pib_stats <- general_pib_lm.s %>% test_linearfit(model_name='pib_gen')
+general_pib_stats
+```
+
+#### Temperature
+
+```{r}
+temperature_data_summary_weighted_general.f <- temperature_data_summary_weighted_general %>%
+  filter(region == 'S') %>% 
+  select(-region, -percentage, -unique_key)
+
+temperature_data_summary_weighted_general.f$mean_temp_3 <- temperature_data_summary_weighted_general.f$weighted_temp %>% rollmean(k=3, na.pad = T, align = 'right')
+temperature_data_summary_weighted_general.f$mean_max_temp_3 <- temperature_data_summary_weighted_general.f$weighted_temp_max %>% rollmean(k=3, na.pad = T, align = 'right')
+temperature_data_summary_weighted_general.f$mean_temp_6 <- temperature_data_summary_weighted_general.f$weighted_temp %>% rollmean(k=6, na.pad = T, align = 'right')
+
+temperature_data_summary_weighted_general.f
+
+monthly_consumption_temperature_general <-  monthly_consumption %>% left_join(temperature_data_summary_weighted_general.f)
+```
+
+##### Differences between weigthed and equal weight average
+
+```{r}
+general_temperature_lm <- lm(total ~ weighted_temp, monthly_consumption_temperature_general)
+
+general_temperature_lm %>% test_linearfit()
+
+
+general_temperature_equal_lm <- lm(total ~ equal_weight, monthly_consumption_temperature_general)
+
+general_temperature_equal_lm %>% test_linearfit()
+```
+
+##### Testing average of 3 and 6 months
+
+```{r}
+lm(total ~ weighted_temp + mean_temp_3 , monthly_consumption_temperature_general) %>% test_linearfit()
+lm(total ~ weighted_temp + mean_temp_6 , monthly_consumption_temperature_general) %>% test_linearfit()
+```
+
+##### Including current values and average togheter
+
+```{r}
+general_temperature_lm <- lm(total ~ weighted_temp + mean_temp_3 + mean_max_temp_3 + weighted_temp_max , monthly_consumption_temperature_general)
+
+general_temperature_lm %>% test_linearfit()
+general_temperature_lm.s <- general_temperature_lm %>% step(k=step_wise_k, trace=F)
+general_temperature_lm.s
+general_temperature_stats <- general_temperature_lm.s %>% test_linearfit(model_name = 'temp_gen')
+general_temperature_stats
+
+
+```
+
+#### Credit concession
+
+```{r}
+monthly_consumption_credit <- monthly_consumption %>% left_join(recursos_livres_totais_current, by=c('year_month' = 'date')) %>% 
+  select(-valor_ipca, -acc_inflation)
+```
+
+##### Comparing current and not current credit values
+
+```{r}
+
+lm(total ~ credit, data=monthly_consumption_credit) %>% test_linearfit()
+lm(total ~ credit_current, data=monthly_consumption_credit) %>% test_linearfit()
+
+
+```
+
+##### Credit concession general impact
+
+```{r}
+
+
+general_credit_lm <- lm(total ~ . -credit -year_month, data=monthly_consumption_credit)
+
+general_credit_lm %>% test_linearfit()
+
+general_credit_lm.s <- general_credit_lm %>% step(k=step_wise_k, trace=F)
+
+general_credit_stats <- general_credit_lm.s %>%  test_linearfit(model_name = 'credit_gen')
+general_credit_stats
+
+```
+
+#### Minimum wage general impact
+
+```{r}
+monthly_consumption_wages <- monthly_consumption %>% 
+  left_join(minimum_wage, by=c('year_month'='date'))
+
+general_wage_stats <- lm(total ~ wages, monthly_consumption_wages) %>% test_linearfit(model_name = 'wage_gen')
+general_wage_stats
+```
+
+#### All stats Summary
+
+```{r}
+list(general_ipca_stats,
+general_selic_stats,
+general_pib_stats,
+general_temperature_stats,
+general_credit_stats,
+general_wage_stats) %>% unioun_lists() -> summary_general_model
+
+summary_general_model %>% pretty_head_show(10)
+```
+
+### Residential Power Consumption Impact
+
+#### Creating Residential Dataframe
+
+```{r}
+power_consumption_sector_residential_aggregated <- power_consumption_sector %>% filter(SetorN1=='Residencial') %>%
+  group_by(year_month) %>% 
+  summarise(total=sum(total)) %>% 
+  ungroup(.)
+
+
+```
+
+#### IPCA Impact
+
+```{r}
+ipca_power_df <-
+  power_consumption_sector_residential_aggregated %>% left_join(ipca, by=c('year_month' = 'data'))
+
+residential_ipca_lm <- lm(total ~ .  -year_month, data=ipca_power_df)
+
+residential_ipca_lm %>% test_linearfit()
+
+residential_ipca_lm.s <- residential_ipca_lm %>% step(k=step_wise_k, trace=F)
+
+residential_ipca_stats <- residential_ipca_lm.s %>% test_linearfit(model_name='resi_ipca')
+residential_ipca_stats
+
+```
+
+#### SELIC
+
+```{r}
+
+
+selic_power_df <- power_consumption_sector_residential_aggregated %>% left_join(selic_monthly) %>% 
+  select(-data)
+
+
+residential_selic_lm <- lm(total ~ .  -year_month, data=selic_power_df)
+
+residential_selic_lm %>% test_linearfit()
+
+residential_selic_lm.s <- residential_selic_lm %>% step(k=step_wise_k, trace=F)
+
+residential_selic_stats <- residential_selic_lm.s %>% test_linearfit(model_name='resi_selic')
+residential_selic_stats
+```
+
+#### Temperature
+
+```{r}
+
+
+temperature_data_summary_weighted_residential.f <- temperature_data_summary_weighted_residential %>%
+  filter(region == 'S') %>% 
+  select(-region, -percentage, -unique_key)
+
+temperature_data_summary_weighted_residential.f$mean_temp_3 <- temperature_data_summary_weighted_residential.f$weighted_temp %>% rollmean(k=3, na.pad = T, align = 'right')
+temperature_data_summary_weighted_residential.f$mean_max_temp_3 <- temperature_data_summary_weighted_residential.f$weighted_temp_max %>% rollmean(k=3, na.pad = T, align = 'right')
+temperature_data_summary_weighted_residential.f$mean_temp_6 <- temperature_data_summary_weighted_residential.f$weighted_temp %>% rollmean(k=6, na.pad = T, align = 'right')
+
+temperature_data_summary_weighted_residential.f
+
+
+temp_power_df <- power_consumption_sector_residential_aggregated %>%
+  left_join(temperature_data_summary_weighted_residential.f)
+
+
+
+residential_temperature_lm <- lm(total ~ weighted_temp + mean_temp_3 +weighted_temp_max + mean_max_temp_3, data=temp_power_df)
+
+
+residential_temperature_lm %>% test_linearfit()
+
+residential_temperature_lm.s <- residential_temperature_lm %>% step(k=step_wise_k, trace=F)
+
+residential_temperature_stats <- residential_temperature_lm.s %>% test_linearfit(model_name='resi_temp')
+residential_temperature_stats
+```
+
+#### Recursos Livres Pessoa Física
+
+```{r}
+
+
+credit_power_df <- power_consumption_sector_residential_aggregated %>%
+  left_join(recursos_livres_pf_current, by=c('year_month' = 'date')) %>% 
+  select(-valor_ipca, -acc_inflation)
+
+
+residential_credit_lm <- lm(total ~ . -year_month -credit, data=credit_power_df)
+
+
+residential_credit_lm %>% test_linearfit()
+
+residential_credit_lm.s <- residential_credit_lm %>% step(k=step_wise_k, trace=F)
+
+residential_credit_stats <- residential_credit_lm.s %>% test_linearfit(model_name = 'resi_credit')
+
+residential_credit_stats
+
+```
+
+#### Minimum Wage
+
+```{r}
+
+wage_power_df <- power_consumption_sector_residential_aggregated %>% 
+  left_join(minimum_wage, by=c('year_month'='date'))
+
+residential_wage_lm <- lm(total ~ . -year_month, data=wage_power_df)
+
+
+residential_wage_stats <- residential_wage_lm %>% test_linearfit(model_name = 'resi_wage')
+residential_wage_stats
+
+
+```
+
+#### All stats Summary
+
+```{r}
+list(residential_ipca_stats,
+residential_selic_stats,
+residential_temperature_stats,
+residential_credit_stats,
+residential_wage_stats) %>% unioun_lists() -> summary_residential_model
+
+summary_residential_model %>% pretty_head_show(10)
+```
+
+### Residential Power Consumption Impact --- Low Income
+
+```{r}
+ power_consumption_sector_residential_aggregated_low <- power_consumption_sector %>% 
+  filter(SetorN1=='Residencial' & SetorN2 == 'Baixa Renda') %>% 
+  select(-SetorN1, -SetorN2) 
+
+
+power_consumption_sector_residential_aggregated_low <- power_consumption_sector_residential_aggregated_low %>% filter(year_month >= yearmonth("2015-05"))
+
+
+```
+
+#### IPCA Impact
+
+```{r}
+ipca_power_df_low <-
+  power_consumption_sector_residential_aggregated_low %>% left_join(ipca, by=c('year_month' = 'data'))
+
+residential_ipca_low_lm <- lm(total ~ .  -year_month, data=ipca_power_df_low)
+
+residential_ipca_low_lm %>% test_linearfit()
+# 
+# 
+# lambda_power <- ipca_power_df_low$total %>% car::powerTransform()
+# 
+# ipca_power_df_low$total_bc <- box_cox(ipca_power_df_low$total, lambda_power$lambda)
+
+# residential_ipca_low_lm.bc <- lm(total_bc ~ .  -year_month -total, data=ipca_power_df_low) 
+# 
+# residential_ipca_low_lm.bc %>% test_linearfit()
+
+
+residential_ipca_low_lm.s <- residential_ipca_low_lm %>% step(k=step_wise_k, trace=F)
+
+residential_ipca_low_lm.s %>% test_linearfit()
+# 
+# residential_ipca_low_lm.bc.s <- residential_ipca_low_lm.bc %>% step(k=step_wise_k, trace=F)
+
+residential_low_ipca_stats <- residential_ipca_low_lm.s %>% test_linearfit(model_name = 'low_resi_ipca')
+
+residential_low_ipca_stats
+
+```
+
+#### SELIC
+
+```{r}
+
+
+selic_power_df_low <- power_consumption_sector_residential_aggregated_low %>% left_join(selic_monthly) %>% 
+  select(-data)
+
+
+residential_selic_low_lm <- lm(total ~ .  -year_month, data=selic_power_df_low)
+
+residential_selic_low_lm %>% test_linearfit()
+
+
+residential_selic_low_lm.s <- residential_selic_low_lm %>% step(k=step_wise_k, trace=F)
+
+residential_low_selic_stats <- residential_selic_low_lm.s %>% test_linearfit(model_name = 'low_resi_selic')
+residential_low_selic_stats
+
+
+```
+
+#### Temperature
+
+```{r}
+
+
+residential_power_consumption_temp_low <- power_consumption_sector_residential_aggregated_low %>%
+  left_join(temperature_data_summary_weighted_residential.f)
+
+residential_temp_low_lm <- lm(total ~ weighted_temp + mean_temp_3, data=residential_power_consumption_temp_low)
+
+
+
+
+residential_low_temperature_stats <- residential_temp_low_lm %>% test_linearfit(model_name = 'low_resi_temp')
+
+residential_low_temperature_stats
+
+```
+
+#### Recursos Livres Pessoa Física
+
+```{r}
+
+
+credit_power_df_low <- power_consumption_sector_residential_aggregated_low %>%
+  left_join(recursos_livres_pf_current, by=c('year_month' = 'date')) %>% 
+  select(-valor_ipca, -acc_inflation)
+
+
+residential_credit_low_lm <- lm(total ~ . -year_month -credit, data=credit_power_df_low)
+
+
+residential_credit_low_lm %>% test_linearfit()
+
+residential_credit_low_lm.s <- residential_credit_low_lm %>% step(k=step_wise_k, trace=F)
+
+residential_low_credit_stats <- residential_credit_low_lm.s %>% test_linearfit(model_name='low_resi_credit')
+residential_low_credit_stats
+```
+
+#### Minimum Wage
+
+```{r}
+wage_power_df_low <- power_consumption_sector_residential_aggregated_low %>% 
+  left_join(minimum_wage, by=c('year_month'='date'))
+
+residential_wage_low_lm <- lm(total ~ . -year_month, data=wage_power_df_low)
+
+residential_low_wage_stats <- residential_wage_low_lm %>% test_linearfit(model_name='low_resi_wage')
+residential_low_wage_stats
+```
+
+#### All stats Summary
+
+```{r}
+list(residential_low_ipca_stats,
+residential_low_selic_stats,
+residential_low_temperature_stats,
+residential_low_credit_stats,
+residential_low_wage_stats) %>% unioun_lists() -> summary_residential_low_model
+
+summary_residential_low_model %>% pretty_head_show(10)
+```
+
+## Agrregating all variables
+
+### General Model
+
+#### Selectig the datasets
+
+```{r}
+summary_general_model %>% 
+  filter(f_statistic....05.<=50e-3 &  normality_test_p>=50e-3 & model_name != 'pib_gen') %>% 
+  pretty_head_show(10)
+
+
+```
+
+#### General Power Consumption
+
+```{r}
+agg_gen_variables_power <- monthly_consumption_ipca %>% 
+  left_join(monthly_consumption_selic %>% select(-total), by='year_month') %>% 
+  left_join(monthly_consumption_credit %>% select(-total), by='year_month') %>% 
+  left_join(monthly_consumption_wages %>% select(-total), by='year_month') %>% 
+  left_join(monthly_consumption_temperature_general %>% select(-total, -equal_weight, -equal_weight_max  , -mean_temp_6, -mean_temp, -max_temp), by='year_month') %>% 
+  select(-credit)
+
+
+general_agg_lm <- lm(total ~ .-year_month, agg_gen_variables_power)
+
+general_agg_lm %>% test_linearfit()
+
+
+general_agg_lm.s <- general_agg_lm %>% step(k=step_wise_k, trace=F)
+
+general_agg_lm.s %>% test_linearfit(T)
+
+
+  
+```
+
+### Residential Power Consumption
+
+#### Selecting Varibles
+
+```{r}
+summary_residential_model %>% 
+  filter(f_statistic....05.<=50e-3 &  normality_test_p>=50e-3 & model_name != 'pib_gen') %>% 
+  pretty_head_show(10)
+```
+
+#### Residential aggregated model
+
+```{r}
+agg_variables_power <- selic_power_df %>% 
+  left_join(ipca_power_df %>% select(-total), by='year_month') %>%
+  left_join(credit_power_df%>% select(-total), by='year_month') %>%
+  left_join(temp_power_df%>% select(-total), by='year_month') %>%
+  left_join(wage_power_df%>% select(-total), by='year_month') %>% 
+  select(-credit, -mean_temp_6, -credit_mean_36, -mean_temp, -equal_weight, -max_temp)
+
+
+aggregated_lm <- lm(total ~ . -year_month, agg_variables_power) 
+  
+aggregated_lm %>% test_linearfit()
+
+aggregated_lm.s <- aggregated_lm %>% step(k=step_wise_k, trace=F)
+
+aggregated_lm.s %>% test_linearfit(T)
+  
+
+```
+
+### Low Income
+
+#### Selecting variables
+
+```{r}
+summary_residential_low_model %>% 
+  filter(f_statistic....05.<=50e-3 &  normality_test_p>=40e-3 & model_name != 'pib_gen') %>% 
+  pretty_head_show(10)
+```
+
+#### Low Income Model
+
+```{r}
+agg_variables_power_low <- ipca_power_df_low %>% 
+  left_join(credit_power_df_low%>% select(-total, ), by='year_month') %>% 
+  left_join(selic_power_df_low %>% select(-total), by='year_month') %>% 
+  select(-credit_mean_36, -credit, -credit_mean_36)
+
+agg_variables_power_low
+
+aggregated_lm_low <- lm(total ~. -year_month, agg_variables_power_low) 
+  
+aggregated_lm_low %>% test_linearfit()
+
+aggregated_lm_low.s <- aggregated_lm_low %>% step(k=step_wise_k, trace=F)
+
+aggregated_lm_low.s %>% test_linearfit(T)
+
+
+```

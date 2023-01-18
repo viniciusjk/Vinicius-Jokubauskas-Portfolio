@@ -1,0 +1,1506 @@
+---
+title: "Final's project preliminary study"
+output:
+  html_document: 
+    toc: yes
+    keep_md: yes
+    theme: paper
+---
+
+## Reading the libraries necessary to the project
+
+```{r message=FALSE, warning=FALSE}
+source('libs.R')
+```
+
+## Reading Power Consumption Data
+
+```{r}
+data <- read.csv('./anuario-estatistico-de-energia-eletrica/dados-anuario.csv', sep=';')
+```
+
+## Tidying data
+
+### Converting char data to float
+
+```{r}
+data[, c('Consumidores')] <- data[, c('Consumidores')] %>% 
+  str_replace_all(',(?=\\d)','.') %>% as.double
+data[, c('Consumo')] <- data[, c('Consumo')] %>% 
+  str_replace_all(',(?=\\d)','.') %>% as.double
+```
+
+### Converting char data to Date
+
+```{r}
+data$Data <- data$Data %>%
+  as.character %>%
+  strptime('%Y%m%d') %>%
+  as.Date()
+```
+
+
+
+
+#### Grouping date
+
+```{r}
+data <- data %>% mutate(
+  year = year(Data),
+  year_month = yearmonth(Data),
+  year_quarter = yearquarter(Data)
+)
+```
+
+
+#### Creating a new Region Column
+
+```{r}
+data$region <- data$UF %>%
+  str_replace_all('(AL|BA|PB|PE|PI|RN|SE|CE|MA)', 'NE') %>% 
+  str_replace_all('(ES|SP|MG|RJ)', 'SE') %>% 
+  str_replace_all('(TO|AC|AM|AP|RO|RR|PA)', 'N') %>% 
+  str_replace_all('(MT|MS|DF|GO)', 'CO') %>% 
+  str_replace_all('(PR|RS|SC)', 'S')
+```
+
+
+### Converting char data to factor
+
+```{r}
+
+data %>% map(class)->columns_classes
+data[columns_classes[columns_classes=='character'] %>% names] <- data[columns_classes[columns_classes=='character'] %>% names] %>% as_factor()
+
+     
+# data[columns_classes[columns_classes=='character'] %>% names] %>% as_factor()
+     
+
+data %>% mutate(
+  UF = as.factor(UF),
+  Sistema=as.factor(Sistema),
+  TipoConsumidor = as.factor(TipoConsumidor),
+  SetorN1 = as.factor(SetorN1),
+  SetorN2 = as.factor(SetorN2),
+  TensaoN1 = as.factor(TensaoN1),
+  TensaoN2 = as.factor(TensaoN2),
+  TensaoN3 = as.factor(TensaoN3),
+  FaixaDeConsumoN1 = as.factor(FaixaDeConsumoN1),
+  FaixaDeConsumoN2 = as.factor(FaixaDeConsumoN2),) ->data
+
+
+
+```
+
+## Data overview
+
+```{r}
+data %>% select(-year_month, -year_quarter)  %>% summary
+
+
+
+```
+
+
+## Exploring Data
+
+### Grouping power consumption by state
+
+```{r}
+data %>% 
+  group_by(UF) %>% 
+  summarise(total = sum(Consumo)) -> consumo_uf
+
+consumo_uf
+```
+
+
+### Grouping consumption by month
+
+
+```{r}
+
+montlhy_consumption <- data %>% group_by(year_month) %>% 
+  summarise(total=sum(Consumo))
+
+montlhy_consumption
+```
+
+
+
+### Grouping consumption by quarter
+
+
+  
+```{r}
+quartely_consumption <- data %>% group_by(year_quarter) %>% 
+  summarize(total=sum(Consumo))
+quartely_consumption
+```
+
+### Grouping consumption by year
+
+  
+```{r}
+yearly_consumption <- data %>% group_by(year) %>% 
+  summarize(total=sum(Consumo))
+yearly_consumption
+```
+### Grouping by year_month and sector
+
+```{r}
+data %>% group_by(year_month,SetorN1, SetorN2 ) %>% 
+  summarise(total=sum(Consumo)) %>%
+  ungroup()  -> data_by_sector
+```
+
+
+## Reading Geographical data
+
+```{r}
+brazil_uf <- readOGR(dsn='BR', layer='BR_UF_2021')
+brazil_uf@data %>% left_join(consumo_uf, by=c('SIGLA'='UF')) -> brazil_uf@data
+
+
+brazil_uf %>% tm_shape() +
+ tm_polygons('total',
+             style='quantile',
+             palette='viridis')
+
+```
+
+
+## TIME SERIES
+
+
+### Time series by Sector
+
+```{r}
+data %>% 
+  select(year_month, SetorN1, Consumo) %>% 
+  group_by(year_month, SetorN1) %>% 
+  summarise(total=sum(Consumo)) %>% 
+  as_tsibble(key=SetorN1, index = year_month) -> sector_ts
+
+sector_ts %>% autoplot() %>% ggplotly()
+
+sector_ts %>% autoplot() 
+
+```
+
+
+
+```{r}
+sector_ts %>% model(
+  ETS = fable::ETS(),
+  arima = fable::ARIMA()
+) -> model_sector
+
+model_sector %>% forecast(h='6 months') %>% 
+  autoplot(sector_ts) +
+  facet_grid(SetorN1 ~ .model)
+
+
+model_sector %>% accuracy()
+```
+
+### Time series by Region
+
+```{r}
+
+data %>% 
+  mutate(year_month = yearmonth(Data)) %>% 
+  select(year_month, Sistema, Consumo) %>% 
+  group_by(year_month, Sistema) %>% 
+  summarise(total=sum(Consumo)) %>% 
+  as_tsibble(key=Sistema, index = year_month)  -> region_ts
+
+region_ts %>% autoplot() %>% ggplotly()
+region_ts %>% autoplot()
+
+
+```
+```{r}
+region_ts %>% 
+  model(
+    ETS = fable::ETS(),
+    ARIMA = fable::ARIMA()
+  ) -> model_region
+
+model_region %>% forecast(h='6 months') %>% 
+  autoplot(region_ts) +
+  facet_grid(Sistema ~ .model)
+
+
+model_region %>% forecast(h='16 months') %>% 
+  autoplot(region_ts) +
+  facet_grid(.model~Sistema)
+```
+
+  
+## Visualizations
+
+### Consumption by Consumer Type
+
+
+  
+```{r}
+data %>%
+  mutate(year = year(Data)) %>% 
+  group_by(year, TipoConsumidor) %>% 
+  summarise(total=sum(Consumo)) %>% 
+  filter(year==2019) %>% 
+  ggplot(aes(TipoConsumidor, total)) +
+  geom_col(aes(fill=TipoConsumidor)) +
+  coord_flip() -> consumer_type
+
+ggplotly(consumer_type)
+consumer_type
+```
+
+
+### Consumption by Sector N1 (Rural, Comercial, Industrial ...)
+
+```{r}
+
+sector_plot <- data %>% 
+  mutate(year = year(Data)) %>% 
+  group_by(year, SetorN1) %>% 
+  summarise(total=sum(Consumo)) %>% 
+  filter(year==2019) %>% 
+  arrange(desc(total)) %>% 
+  ggplot(aes(reorder(SetorN1, (total)), total))+
+  geom_col(aes(fill=SetorN1)) +
+  scale_y_continuous(labels = comma) +
+  coord_flip() +
+  ylab('Power Consumption (MWh)') +
+  xlab('Sector') +
+  labs(    title = "2019's Power Consumption by Sector", fill='Sector'  ) 
+
+
+sector_plot %>% ggplotly
+sector_plot 
+```
+
+
+### Consumption by state
+
+```{r}
+
+state_consumption_plot <- data %>% 
+  mutate(year = year(Data)) %>% 
+  group_by(year, UF) %>% 
+  summarise(total=sum(Consumo)) %>% 
+  filter(year==2019) %>% 
+  ggplot(aes(reorder(UF, total), total))+
+  geom_col(aes(fill=UF)) +
+  xlab('State') +
+  ylab('Total Consumption')
+
+state_consumption_plot %>% ggplotly()
+
+state_consumption_plot
+
+```
+
+
+
+
+### Consumption by Region (S, SE, CO, N, NE)
+
+
+```{r}
+
+region_consumption_plot <- data %>% 
+  mutate(year = year(Data)) %>% 
+  group_by(year, region) %>% 
+  summarise(total=sum(Consumo)) %>% 
+  filter(year==2019) %>% 
+  ggplot(aes(reorder(region, desc(total)), total))+
+  geom_col(aes(fill=region)) +
+  xlab('Region') +
+  ylab('Total Power Consumption') +
+  labs(title = "2019's Power Consumption by Region (MWh)",
+       fill = 'Region') +
+  scale_y_continuous(labels = comma)
+
+region_consumption_plot %>% ggplotly()
+region_consumption_plot
+```
+### Annual Historic Power Consumption
+
+```{r}
+data %>% 
+  group_by(year) %>% 
+  summarise(total_power_consumption_by_year=sum(Consumo)) %>% 
+  ggplot(aes(x=year, y=total_power_consumption_by_year)) +
+  geom_line(color='blue')+
+  geom_point(color='red') +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Annual Power Total Power Consumption") +
+  ylab('Total Power Consumption (MWh)') +
+  xlab('Year')
+
+```
+
+
+## Other data streams
+
+### Helper Functions
+
+#### Apply several linear model tests
+```{r}
+
+test_linearfit <- function(model){
+  
+  logLik_ <- logLik(model)
+
+  
+  results <- list(
+    'rsquared' = summary(model)$r.squared,
+    'normality_test_p' = sf.test(model$residuals)$p.value,
+    'brusch_pagan_p(>.05)' = ols_test_breusch_pagan(model)$p,
+    'logLik' = logLik_
+    
+  )
+  
+  print(summary(model))
+  return(results)
+  
+}
+
+step_wise_k <-  3.841459
+
+```
+
+#### Lag several columns and creates a new dataframe
+
+```{r}
+lag_columns <- function(origin_df, columns, lag_size = 1){
+  
+  new_df <-  data.frame(origin_df)
+  for (i in columns){
+    
+    new_df[,i] <- lag(new_df[,i], lag_size)
+    
+  }
+  
+  return (new_df)
+    
+}
+```
+
+### IPCA
+
+### Helper functions
+
+
+#### Reading IPCA
+
+
+```{r}
+ipca <- read.csv('http://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados?formato=csv', sep=';')
+
+ipca %>% sample_n(10)
+
+
+```
+
+
+### Transforming the date input from char to Date
+
+
+```{r}
+
+ipca <- ipca %>% mutate(
+  valor = valor %>% 
+    str_replace(',','.') %>% 
+    as.numeric(),
+  data = data %>% yearmonth(format='%d-%m-%Y')
+)
+
+```
+
+
+#### Grouping by periods
+
+
+##### Accumulated IPCA 3 Months
+
+```{r}
+
+ipca['ipca_3'] <- bind_rows(
+  list('ipca_3' = c(1:2)*NA),
+  list('ipca_3' = rollapply((ipca$valor/100 + 1), 3, prod))) * 100 -100
+
+```
+
+##### Accumulated IPCA 12 Months
+
+```{r}
+ipca['ipca_12'] <- bind_rows(
+  list('ipca_12' = c(1:11)*NA),
+  list('ipca_12' = rollapply((ipca$valor/100 + 1), 12, prod))) * 100 -100
+
+```
+
+
+##### Accumulated IPCA 24 Months
+
+```{r}
+ipca['ipca_24'] <- bind_rows(
+  list('ipca_24' = c(1:23)*NA),
+  list('ipca_24' = rollapply((ipca$valor/100 + 1), 24, prod))) * 100 -100
+  
+```
+
+##### Accumulated IPCA 36 Months
+
+```{r}
+ipca['ipca_36'] <- bind_rows(
+  list('ipca_36' = c(1:35)*NA),
+  list('ipca_36' = rollapply((ipca$valor/100 + 1), 36, prod))) * 100 -100
+```
+
+
+#### Filtering from Jan 2000 to Dec 2021
+
+```{r}
+
+ipca <- ipca %>% filter(
+  data %in% c(yearmonth('2000-01-01'):yearmonth('2022-12-31'))
+)
+```
+
+
+#### IPCA OVerview
+
+```{r}
+ipca %>% mutate(data=as.Date(data)) %>% summary
+
+```
+
+
+#### Visualizing data
+
+##### Accumulated IPCA by different time windows
+
+```{r}
+
+
+ggplotly(
+ipca %>% ggplot(aes(x=data)) +
+  geom_line(aes(y=ipca_12,color='IPCA 12 months')) +
+  geom_line(aes(y=ipca_3,color='IPCA 3 months')) + 
+  geom_line(aes(y=ipca_24,color='IPCA 24 months')) +
+  geom_line(aes(y=ipca_36,color='IPCA 36 months')) +
+  xlab('Mês') +
+  labs(color='IPCA', title = 'Accumulated IPCA')
+)
+
+ipca %>% ggplot(aes(x=data)) +
+  geom_line(aes(y=ipca_12,color='IPCA 12 months')) +
+  geom_line(aes(y=ipca_3,color='IPCA 3 months')) + 
+  geom_line(aes(y=ipca_24,color='IPCA 24 months')) +
+  geom_line(aes(y=ipca_36,color='IPCA 36 months')) +
+  xlab('Mês') +
+  labs(color='IPCA', title = 'Accumulated IPCA')
+```
+
+
+
+##### Average IPCA by different time windows
+
+
+```{r}
+ggplotly(
+ipca %>% ggplot(aes(x=data)) +
+  geom_line(aes(y=((ipca_12/100 + 1) ^(1/12))*100-100, color = 'ipca_12') ) +
+  geom_line(aes(y=((ipca_3/100 + 1) ^(1/3))*100-100, color='ipca_3')) + 
+  geom_line(aes(y=((ipca_24/100 + 1) ^(1/24))*100-100, color='ipca_24')) +
+  geom_line(aes(y=((ipca_36/100 + 1) ^(1/36))*100-100, color='ipca_36')) +
+  xlab('Month') +
+  ylab('Avarage inflation') +
+  labs(color='IPCA')
+  
+)
+
+ipca %>% ggplot(aes(x=data)) +
+  geom_line(aes(y=((ipca_12/100 + 1) ^(1/12))*100-100, color = 'ipca_12') ) +
+  geom_line(aes(y=((ipca_3/100 + 1) ^(1/3))*100-100, color='ipca_3')) + 
+  geom_line(aes(y=((ipca_24/100 + 1) ^(1/24))*100-100, color='ipca_24')) +
+  geom_line(aes(y=((ipca_36/100 + 1) ^(1/36))*100-100, color='ipca_36')) +
+  xlab('Month') +
+  ylab('Avarage inflation') +
+  labs(color='IPCA')
+
+
+ggplotly(
+montlhy_consumption %>% ggplot(aes(x=year_month))+
+  geom_line(aes(y=total), color='blue', show.legend = TRUE)
+)
+
+montlhy_consumption %>% ggplot(aes(x=year_month))+
+  geom_line(aes(y=total), color='blue', show.legend = TRUE)
+```
+
+#### Joining IPCA + Power Consumption datasets
+
+
+```{r}
+ipca_consumption <- montlhy_consumption %>% left_join(ipca, by=c(year_month="data"))
+ipca_consumption
+```
+##### Power Consumption with lag on IPCA
+
+- O IPCA do mês anterior, afeta o consumo de energia do mês seguinte
+
+```{r}
+lag_size = 1
+
+
+ipca_consumption_lagged <- montlhy_consumption %>%
+  left_join( 
+    ipca %>% lag_columns(columns = c('ipca_3', 'ipca_12', 'ipca_24', 'ipca_36'), lag_size=lag_size),
+    by=c(year_month = 'data')
+  )
+
+ipca_consumption_lagged
+
+
+```
+
+#### Creating linear models
+
+##### Normal models
+
+```{r}
+lm_3 <- lm(total ~ ipca_3, ipca_consumption)
+lm_12 <- lm(total ~ ipca_12, ipca_consumption)
+lm_24 <- lm(total ~ ipca_24, ipca_consumption)
+lm_36 <- lm(total ~ ipca_36, ipca_consumption)
+
+```
+
+
+##### Lagged models
+
+```{r}
+lm_3_lagged <- lm(total ~ ipca_3, ipca_consumption_lagged)
+lm_12_lagged <- lm(total ~ ipca_12, ipca_consumption_lagged)
+lm_24_lagged <- lm(total ~ ipca_24, ipca_consumption_lagged)
+lm_36_lagged <- lm(total ~ ipca_36, ipca_consumption_lagged)
+
+```
+
+##### Grouping and evaluating models
+```{r}
+
+lm_3 %>% test_linearfit()
+lm_3_lagged %>% test_linearfit()
+lm_12 %>% test_linearfit()
+lm_12_lagged %>% test_linearfit()
+lm_24 %>% test_linearfit()
+lm_24_lagged %>% test_linearfit()
+lm_36 %>% test_linearfit()
+lm_36_lagged %>% test_linearfit()
+
+
+```
+#### IPCA Impact on Residential Consumption
+
+
+##### General Impact
+```{r}
+data_by_sector %>% filter(SetorN1=='Residencial') %>% 
+  group_by(year_month) %>% 
+  summarise(total= sum(total)) %>% 
+  left_join(ipca, by=c(year_month='data')) -> ipca_resindential_power_consumption
+
+
+lm_residential_ipca_general <- lm(total ~ valor + ipca_12 + ipca_3 + ipca_24 + ipca_36, ipca_resindential_power_consumption)
+
+
+lm_residential_ipca_general %>% test_linearfit()
+
+
+lm_residential_ipca_general %>% step(k=3.841459) -> lm_residential_ipca_general.s
+
+lm_residential_ipca_general.s %>% test_linearfit()
+
+```
+
+##### Low income Impact
+```{r}
+data_by_sector %>% filter(SetorN1=='Residencial' & SetorN2=='Baixa Renda' ) %>% 
+  group_by(year_month) %>% 
+  summarise(total= sum(total)) %>% 
+  left_join(ipca, by=c(year_month='data')) -> ipca_resindential_low_power_consumption
+
+
+lm_residential_low_ipca_general <- lm(total ~ valor + ipca_12 + ipca_3 + ipca_24 + ipca_36, ipca_resindential_low_power_consumption)
+
+
+lm_residential_low_ipca_general %>% test_linearfit()
+
+
+lm_residential_low_ipca_general %>% step(k=3.841459) -> lm_residential_low_ipca_general.s
+
+lm_residential_low_ipca_general.s %>% test_linearfit()
+
+```
+#### IPCA impact in all Sectors
+
+```{r}
+data_by_sector$SetorN1 %>% unique  -> SetorN1
+
+SetorN1
+
+results <- list()
+
+
+
+for (i in SetorN1){
+  print(i)
+  data_by_sector %>% filter(SetorN1 == i) %>% 
+    group_by(year_month) %>% 
+    summarise(total=sum(total)) %>% 
+    left_join(ipca, by=c('year_month'='data')) -> intemediary
+  
+  lm <- lm(total ~ valor + ipca_3 + ipca_12 + ipca_24 + ipca_36, intemediary)
+  lm.s <- lm %>% step(k=3.841459)
+  
+  
+  print(i)
+  lm.s %>% test_linearfit() %>% print()
+  
+}
+```
+
+
+### Selic
+
+API Base link: http://api.bcb.gov.br/dados/serie/bcdata.sgs.1178/dados?formato=csv
+
+```{r}
+selic_url_yearly <- 'http://api.bcb.gov.br/dados/serie/bcdata.sgs.1178/dados?formato=csv'
+
+selic_yearly <- read.csv(selic_url_yearly, sep=';')
+
+
+
+selic_yearly <- selic_yearly %>% 
+  mutate(valor = as.numeric(str_replace(valor, ',','.')),
+         data = as.Date(data, format='%d/%m/%Y'))
+
+selic_montlhy_url <- 'http://api.bcb.gov.br/dados/serie/bcdata.sgs.4390/dados?formato=csv'
+
+
+selic_montlhy <- read.csv(selic_montlhy_url, sep=';')
+
+
+
+selic_montlhy <- selic_montlhy %>% mutate(
+  valor = as.numeric(str_replace(valor, ',','.')),
+         data = as.Date(data, format='%d/%m/%Y'))
+
+```
+
+### Selic Overview
+
+```{r}
+selic_montlhy %>% summary
+```
+
+
+#### Accumulating Selic
+
+```{r}
+selic_montlhy['selic_36'] <- bind_rows(
+  list('selic_36' = c(1:35)*NA),
+  list('selic_36' = rollapply((selic_montlhy$valor/100 + 1), 36, prod))) * 100 -100
+selic_montlhy['selic_03'] <- bind_rows(
+  list('selic_03' = c(1:2)*NA),
+  list('selic_03' = rollapply((selic_montlhy$valor/100 + 1), 03, prod))) * 100 -100
+selic_montlhy['selic_12'] <- bind_rows(
+  list('selic_12' = c(1:11)*NA),
+  list('selic_12' = rollapply((selic_montlhy$valor/100 + 1), 12, prod))) * 100 -100
+selic_montlhy['selic_24'] <- bind_rows(
+  list('selic_24' = c(1:23)*NA),
+  list('selic_24' = rollapply((selic_montlhy$valor/100 + 1), 24, prod))) * 100 -100
+
+selic_montlhy %>% relocate(selic_36, .after=selic_24) -> selic_montlhy
+
+  selic_montlhy <- selic_montlhy %>% mutate(
+    year_month= yearmonth(data)
+  )
+
+
+selic_montlhy %>% sample_n(15)
+```
+
+#### Sellic and Power Consumption relationship
+
+```{r}
+
+
+selic_consumption <- montlhy_consumption %>% 
+  left_join(selic_montlhy) %>% 
+  select(-data)
+  
+
+
+lm_selic_consumption <- lm(total ~ valor + selic_03 + selic_12 + selic_24 + selic_36, selic_consumption)
+
+lm_selic_consumption %>% test_linearfit()
+
+lm_selic_consumption.s <-lm_selic_consumption %>% step(k=3.841459)
+
+lm_selic_consumption.s %>% test_linearfit()
+```
+#### Testing SELIC impact in all sectors
+
+```{r}
+data_by_sector$SetorN1 %>% unique  -> SetorN1
+
+SetorN1
+
+results <- list()
+
+
+
+for (i in SetorN1){
+  print(i)
+  data_by_sector %>% filter(SetorN1 == i) %>% 
+    group_by(year_month) %>% 
+    summarise(total=sum(total)) %>% 
+    left_join(selic_montlhy) %>% 
+    select(-data) -> intemediary
+  
+  lm <- lm(total ~ valor + selic_03 + selic_12 + selic_24 + selic_36, intemediary)
+  lm.s <- lm %>% step(k=3.841459)
+  
+  
+  print(i)
+  lm.s %>% test_linearfit() %>% print()
+  
+}
+
+
+
+```
+
+
+### PIB DATA
+
+
+
+API Base Link: https://servicodados.ibge.gov.br/api/docs/agregados?versao=3#api-bq
+
+
+#### Helper Function
+
+
+##### PIB Data
+```{r}
+
+get_pib_data <- function(url){
+  
+  raw_data <- jsonlite::fromJSON(url)
+  data <- (raw_data[[4]][[1]])[[2]][[1]]$serie
+  data <- data %>% 
+    pivot_longer(
+      colnames(data),
+      names_to = 'year',
+      values_to = 'pib'
+    ) %>% 
+    mutate(
+      pib = as.numeric(pib))
+  
+  return(data)
+  
+  
+}
+```
+
+
+
+
+
+#### Reading data
+
+##### Annual current adjusted values
+
+```{r}
+
+pib_url_current <- 'https://servicodados.ibge.gov.br/api/v3/agregados/6784/periodos/1996|1997|1998|1999|2000|2001|2002|2003|2004|2005|2006|2007|2008|2009|2010|2011|2012|2013|2014|2015|2016|2017|2018|2019/variaveis/9808?localidades=N1[all]'
+
+pib_data <- get_pib_data(pib_url_current)
+
+pib_data 
+```
+
+
+##### Quarterly current adjusted values
+
+```{r}
+
+pib_url_quarter <- 'https://servicodados.ibge.gov.br/api/v3/agregados/2072/periodos/200001|200002|200003|200004|200101|200102|200103|200104|200201|200202|200203|200204|200301|200302|200303|200304|200401|200402|200403|200404|200501|200502|200503|200504|200601|200602|200603|200604|200701|200702|200703|200704|200801|200802|200803|200804|200901|200902|200903|200904|201001|201002|201003|201004|201101|201102|201103|201104|201201|201202|201203|201204|201301|201302|201303|201304|201401|201402|201403|201404|201501|201502|201503|201504|201601|201602|201603|201604|201701|201702|201703|201704|201801|201802|201803|201804|201901|201902|201903|201904|202001|202002|202003|202004|202101|202102|202103|202104/variaveis/933?localidades=N1[all]'
+
+quarter_pib <- get_pib_data(pib_url_quarter)
+
+quarter_pib 
+
+
+```
+
+###### Adjusting the date 
+
+```{r}
+
+quarter_pib$year <- paste0(
+  quarter_pib$year %>% str_match('\\d{4}'),
+  '-',
+  quarter_pib$year %>%
+    str_match('(?<=\\d{4})\\d{2}') %>% 
+    str_replace('04', '12') %>% 
+    str_replace('03', '09') %>% 
+    str_replace('02', '06') %>% 
+    str_replace('01', '03')
+  )
+
+quarter_pib <- quarter_pib %>% 
+  mutate(
+    year= year %>% yearquarter()
+  )
+
+```
+
+##### Grouping power consumption and PIB data
+
+
+```{r}
+
+lag_size_pib <- 1
+
+pib_consumption_quarterly <- quartely_consumption %>%
+  left_join(quarter_pib, by=c("year_quarter"="year"))
+
+pib_consumption_quarterly_lagged <- quartely_consumption %>%
+  left_join(quarter_pib %>% lag_columns(c('pib'),lag_size_pib )
+            , by=c("year_quarter"="year"))
+
+pib_consumption_yearly <- yearly_consumption %>%
+  mutate(year = as.character(year)) %>% 
+  left_join(pib_data, c(year='year'))
+
+pib_consumption_yearly_lagged <- yearly_consumption %>%
+  mutate(year = as.character(year)) %>% 
+  left_join(pib_data %>% lag_columns(c('pib'), lag_size_pib),
+            c('year'='year'))
+
+pib_consumption_quarterly
+pib_consumption_quarterly_lagged
+
+```
+
+##### Creating simple linear models for our PIB data
+
+```{r}
+
+pib_model_qtr <- lm(total ~ pib, pib_consumption_quarterly)
+pib_model_qtr_lagged <- lm(total ~ pib, pib_consumption_quarterly_lagged)
+pib_model_yrl <- lm(total ~ pib, pib_consumption_yearly)
+pib_model_yrl_lagged <- lm(total ~ pib, pib_consumption_yearly_lagged)
+
+```
+
+
+##### Evaluating models
+
+```{r}
+
+pib_model_qtr %>% test_linearfit()
+pib_model_qtr_lagged %>% test_linearfit()
+pib_model_yrl %>% test_linearfit()
+pib_model_yrl_lagged %>% test_linearfit()
+
+
+
+```
+
+
+
+##### Other links not used
+
+- Last years annual PIB
+  https://servicodados.ibge.gov.br/api/v3/agregados/6784/periodos/1996|1997|1998|1999|2000|2001|2002|2003|2004|2005|2006|2007|2008|2009|2010|2011|2012|2013|2014|2015|2016|2017|2018|2019/variaveis/9809?localidades=N1[all]
+  
+- Current value Per capta PIB
+
+  https://servicodados.ibge.gov.br/api/v3/agregados/6784/periodos/1996|1997|1998|1999|2000|2001|2002|2003|2004|2005|2006|2007|2008|2009|2010|2011|2012|2013|2014|2015|2016|2017|2018|2019/variaveis/9812?localidades=N1[all]
+
+
+### Reading commodities Data
+
+- [Historical Commodities Price](https://www.indexmundi.com/commodities/)
+
+
+#### Reading commodities prices
+
+- Wheat
+- Aliminum
+- Coffee
+- Iron Ore
+- Sugar
+- Crude Oil
+
+```{r}
+
+wheat <- read_excel('./data/commodities/wheat-240.xlsx') %>% 
+  mutate(
+    Price=Price %>% str_replace(',', '') %>% as.numeric()) %>% 
+  mutate(
+    ma_12 = rollmean(Price, 12, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_24 = rollmean(Price, 24, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_36 = rollmean(Price, 36, fill = NA, na.pad = FALSE, align = 'right'),
+    Month = yearmonth(Month)
+    )
+
+aluminum <- read_excel('./data/commodities/aluminum-240.xlsx') %>% 
+  mutate(
+    Price=Price %>% str_replace(',', '') %>% as.numeric()  ) %>% 
+  mutate(
+    ma_12 = rollmean(Price, 12, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_24 = rollmean(Price, 24, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_36 = rollmean(Price, 36, fill = NA, na.pad = FALSE, align = 'right'),
+    Month = yearmonth(Month)
+    )
+
+coffee <- read_excel('./data/commodities/robusta-coffee-240.xlsx') %>% 
+  mutate(
+    Price=Price %>% str_replace(',', '') %>% as.numeric()  ) %>% 
+  mutate(
+    ma_12 = rollmean(Price, 12, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_24 = rollmean(Price, 24, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_36 = rollmean(Price, 36, fill = NA, na.pad = FALSE, align = 'right'),
+    Month = yearmonth(Month)
+    )
+
+iron_ore <- read_excel('./data/commodities/iron-ore.xlsx') %>% 
+  mutate(
+    Price=Price %>% str_replace(',', '') %>% as.numeric()) %>%
+  mutate(
+    ma_12 = rollmean(Price, 12, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_24 = rollmean(Price, 24, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_36 = rollmean(Price, 36, fill = NA, na.pad = FALSE, align = 'right'),
+    Month = yearmonth(Month)
+    )
+
+sugar <- read_excel('./data/commodities/sugar-240.xlsx') %>% 
+  mutate(
+    Price=Price %>% str_replace(',', '') %>% as.numeric()) %>%
+  mutate(
+    ma_12 = rollmean(Price, 12, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_24 = rollmean(Price, 24, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_36 = rollmean(Price, 36, fill = NA, na.pad = FALSE, align = 'right'),
+    Month = yearmonth(Month)
+    )
+crude_oil <- read_excel('./data/commodities/crude-oil.xlsx') %>% 
+  mutate(
+    Price=Price %>% str_replace(',', '') %>% as.numeric()) %>%
+  mutate(
+    ma_12 = rollmean(Price, 12, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_24 = rollmean(Price, 24, fill = NA, na.pad = FALSE, align = 'right'),
+    ma_36 = rollmean(Price, 36, fill = NA, na.pad = FALSE, align = 'right'),
+    Month = yearmonth(Month)
+    )
+
+
+```
+
+#### Combining commodities
+
+```{r}
+wheat %>%
+  select(Month, Price) %>% 
+  left_join(coffee %>% select(Month, Price), by=c('Month'='Month')) %>% 
+  rename(price_coffee=Price.y, price_wheat = Price.x) %>% 
+  left_join(aluminum %>% select(Month, Price), by=c('Month'='Month')) %>% 
+  rename(price_aluminum=Price) %>% 
+  left_join(iron_ore %>% select(Month, Price), by=c('Month'='Month')) %>% 
+  rename(iron_price = Price) %>% 
+  left_join(sugar %>% select(Month, Price), by=c('Month'='Month')) %>% 
+  rename(sugar_price = Price) %>% 
+  left_join(crude_oil %>% select(Month, Price), by=c('Month'='Month')) %>% 
+  rename(crude_oil = Price) %>% 
+  filter(Month>=yearmonth('2007-06-01')) %>% 
+  select(-Month) %>% 
+  PerformanceAnalytics::chart.Correlation()
+
+
+
+
+
+```
+
+
+#### Visualizing moving averages in prices
+
+```{r}
+
+iron_ore %>% pivot_longer( cols = c("Price" ,"ma_12",  "ma_24",  "ma_36"))
+
+iron_ore_plot <- iron_ore %>% select(., -Change) %>%
+  pivot_longer(cols=c(-Month)) %>% 
+  ggplot(aes(x=Month, y=value))+
+  geom_line(aes(color=name)) +
+  labs(color='Series', title= 'Iron Ore Price', y='Price BRL')
+
+ggplotly(iron_ore_plot)
+iron_ore_plot       
+
+
+wheat_plot <- wheat %>% select(., -Change) %>%
+  pivot_longer(cols=c(-Month)) %>% 
+  ggplot(aes(x=Month, y=value))+
+  geom_line(aes(color=name)) +
+  labs(color='Series', title= 'Wheat Price', y='Price BRL')        
+
+wheat_plot
+wheat_plot %>% ggplotly()
+
+coffee_plot <- coffee %>% select(., -Change) %>%
+  pivot_longer(cols=c(-Month)) %>% 
+  ggplot(aes(x=Month, y=value))+
+  geom_line(aes(color=name)) +
+  labs(color='Series', title= 'Coffee Price', y='Price BRL')
+
+
+coffee_plot
+ggplotly(coffee_plot)
+
+
+aluminum_plot <- aluminum %>% select(., -Change) %>%
+  pivot_longer(cols=c(-Month)) %>% 
+  ggplot(aes(x=Month, y=value))+
+  geom_line(aes(color=name)) +
+  labs(color='Series', title= 'Aluminum Price', y='Price BRL')
+
+aluminum_plot
+ggplotly(aluminum_plot)
+
+
+crude_oil_plot <- crude_oil %>% select(., -Change) %>%
+  pivot_longer(cols=c(-Month)) %>% 
+  ggplot(aes(x=Month, y=value))+
+  geom_line(aes(color=name)) +
+  labs(color='Series', title= 'Crude Oil Price', y='Price BRL')
+
+crude_oil_plot
+ggplotly(crude_oil_plot)
+
+```
+
+#### Studying the impact of coffee prices on Rural Power Consumption
+```{r}
+rural_consumption <- data %>% 
+  filter(SetorN1=='Rural') %>% 
+  group_by(year_month) %>% 
+  summarise(total = sum(Consumo)) %>% 
+  left_join(coffee, by=c('year_month' = 'Month'))
+
+rural_consumption_lagged <- data %>% 
+  filter(SetorN1=='Rural') %>% 
+  group_by(year_month) %>% 
+  summarise(total = sum(Consumo)) %>% 
+  left_join(coffee %>% lag_columns(columns = c('Price', 'ma_12', 'ma_24', 'ma_36'))
+            , by=c('year_month' = 'Month'))
+```
+
+
+##### Relationship between last month price and power consumption
+
+
+```{r}
+lm_rural_price_lagged <- lm(total ~ Price, rural_consumption_lagged)
+
+lm_rural_price_lagged %>% test_linearfit()
+
+
+
+```
+##### Relationship between last 12 months coffee moving average and Power Consumption
+
+```{r}
+lm_rural_ma_12 <- lm(total ~ ma_12, rural_consumption)
+lm_rural_ma_12 %>% test_linearfit()
+```
+##### Relationship between last 24 months coffee moving average and Power Consumption
+
+```{r}
+lm_rural_ma_24 <- lm(total ~ ma_24, rural_consumption)
+lm_rural_ma_24 %>% test_linearfit()
+```
+##### Relationship between last 36 months coffee moving average and Power Consumption
+
+```{r}
+lm_rural_ma_36 <- lm(total ~ ma_36, rural_consumption)
+lm_rural_ma_36 %>% test_linearfit()
+```
+##### Relationship between Price, last 12,24 and 36 months coffee moving average and Power Consumption combined
+
+
+```{r}
+lm_rural_total <- lm(total ~ ma_12 + ma_24 + ma_36 + Price, rural_consumption)
+
+lm_rural_total %>% test_linearfit()
+
+lm_rural_total.s <- lm_rural_total %>% step(k=3.841459)
+
+lm_rural_total.s %>% test_linearfit()
+
+
+lm_rural_total.s %>% olsrr::ols_vif_tol()
+```
+
+#### Rural Consumption + IPCA impact +  Coffee Price
+
+```{r}
+rural_consumption <- rural_consumption %>% left_join(ipca, by=c('year_month'='data'))
+
+
+lm_rural_ipca_cofee_total = lm(total ~ . -Change, rural_consumption)
+
+lm_rural_ipca_cofee_total %>% test_linearfit()
+
+
+lm_rural_ipca_cofee_total.s <- step(lm_rural_ipca_cofee_total, k=3.841459)
+
+lm_rural_ipca_cofee_total.s %>% test_linearfit()
+
+lm_rural_ipca_cofee_total.s %>% olsrr::ols_vif_tol()
+
+```
+```{r}
+rural_consumption_lagged <-   rural_consumption_lagged %>% 
+  left_join(ipca %>% 
+              lag_columns(
+                columns=c('valor', 'ipca_12', 'ipca_24', 'ipca_36', 'ipca_3')),
+            by=c('year_month'='data'))
+
+
+lm_rural_ipca_cofee_total_lagged = lm(total ~ . -Change, rural_consumption_lagged)
+
+lm_rural_ipca_cofee_total_lagged %>% test_linearfit()
+
+
+lm_rural_ipca_cofee_total_lagged.s <- step(lm_rural_ipca_cofee_total_lagged, k=3.841459)
+
+lm_rural_ipca_cofee_total_lagged.s %>% test_linearfit()
+
+lm_rural_ipca_cofee_total_lagged.s %>% olsrr::ols_vif_tol()
+
+```
+#### Sugar impact in Rural Power Consumption
+
+
+##### Only agroindustria
+```{r}
+data_by_sector %>% 
+  filter(SetorN1=='Rural' & SetorN2=='Agroindústria') %>% 
+  select(year_month, total) %>% 
+  left_join(sugar, by=c('year_month'='Month')) -> sugar_power_consumption_ai
+
+lm_sugar_ai <- lm(total ~ Price + ma_12+ ma_24+ ma_36, sugar_power_consumption_ai)
+
+lm_sugar_ai %>% test_linearfit()
+
+lm_sugar_ai %>% step(k=3.841459) -> lm_sugar_ai.s
+
+
+lm_sugar_ai.s %>% test_linearfit()
+```
+
+##### All Rural sector
+```{r}
+data_by_sector %>% 
+  filter(SetorN1=='Rural') %>% 
+  group_by(year_month) %>% 
+  summarise(total=sum(total)) %>% 
+  select(year_month, total) %>% 
+  left_join(sugar, by=c('year_month'='Month')) -> sugar_power_consumption
+
+lm_sugar <- lm(total ~ Price + ma_12+ ma_24+ ma_36, sugar_power_consumption)
+
+lm_sugar %>% test_linearfit()
+
+lm_sugar %>% step(k=3.841459) -> lm_sugar.s
+
+
+lm_sugar.s %>% test_linearfit()
+```
+
+
+
+#### Crude Oil Impact in Power Consumption
+
+```{r}
+
+
+data_by_sector %>% group_by(year_month) %>% 
+  summarise(total=sum(total)) %>% 
+  left_join(crude_oil, by=c('year_month'='Month')) -> power_consumption_crude_oil
+
+
+power_consumption_crude_oil %>% select(-year_month, -Change) %>% chart.Correlation()
+
+lm_oil <- lm(total ~ Price + ma_12+ ma_24+ ma_36, power_consumption_crude_oil)
+
+
+lm_oil %>% step(lm_oil, k = 3.841459) -> lm_oil.s
+
+
+lm_oil.s %>% test_linearfit()
+```
+
+
+
+#### Studying the impact of inflation in commercial power consumption
+
+```{r}
+comercial_consumption <- data_by_sector %>%
+  filter(SetorN2 == 'Comercial N2') %>% 
+  select(year_month, total) %>%
+  left_join(ipca, c(year_month='data'))
+
+```
+
+##### Testing linear fit for all time windows
+
+```{r}
+lm_comercial_total <- lm(total ~ ., comercial_consumption)
+lm_comercial_total %>% test_linearfit()
+```
+
+###### Stepwise method
+
+```{r}
+lm_comercial_total.s <- lm_comercial_total %>% step(k = 3.841459)
+lm_comercial_total.s %>% test_linearfit()
+```
+
+
+#### Industrial and iron-ore relationship
+
+```{r}
+data_by_sector %>% filter(SetorN1 == 'Industrial') %>% select(-SetorN2) %>% 
+  left_join(iron_ore, by=c(year_month='Month')) -> industrial_iron_price
+
+industrial_iron_price
+
+industrial_model <- lm(total ~ Price +ma_12 +ma_24 +ma_36 , industrial_iron_price)
+
+industrial_model %>% test_linearfit()
+
+industrial_model %>%  step(k = 3.841459) -> industrial_model.s
+
+industrial_model.s %>% test_linearfit()
+
+```
+
+## Reverse impact
+
+```{r}
+data_by_sector %>% group_by(year_month,SetorN1) %>% 
+  summarise(total=sum(total))->data_by_sector_N1
+
+
+data_by_sector_N1  %>% group_by(SetorN1) %>%
+  mutate(setor_avg_03 = rollmean(total, 03, fill= NA, align = 'right'),
+        setor_avg_06 = rollmean(total, 06, fill= NA, align = 'right'),
+        setor_avg_12 = rollmean(total, 12, fill= NA, align = 'right'),
+        setor_avg_24 = rollmean(total, 24, fill= NA, align = 'right'),
+        setor_avg_36 = rollmean(total, 36, fill= NA, align = 'right'), ) %>%
+  arrange(SetorN1, year_month) -> data_by_sector_N1
+
+
+
+```
+
+### Visualizations
+
+```{r}
+
+
+comercial_plot <-  data_by_sector_N1 %>% 
+            ungroup() %>% 
+            filter(SetorN1 == 'Comercial') %>% 
+            pivot_longer(cols = data_by_sector_N1[,-c(1:2)] %>% names) %>% 
+            ggplot(aes(x=year_month, y=value))+
+            geom_line(aes(color=name)) +
+            labs(title='Comercial')
+
+comercial_plot
+ggplotly(comercial_plot)
+
+
+consumo_proprio_plot <-    data_by_sector_N1 %>% 
+            ungroup() %>% 
+            filter(SetorN1 == 'Consumo Próprio') %>% 
+            pivot_longer(cols = data_by_sector_N1[,-c(1:2)] %>% names) %>% 
+            ggplot(aes(x=year_month, y=value))+
+            geom_line(aes(color=name)) +
+            labs(title='Consumo Próprio')
+consumo_proprio_plot
+ggplotly(consumo_proprio_plot)
+
+
+iluminacao_publica_plot <-    data_by_sector_N1 %>% 
+            ungroup() %>% 
+            filter(SetorN1 == 'Iluminação Pública') %>% 
+            pivot_longer(cols = data_by_sector_N1[,-c(1:2)] %>% names) %>% 
+            ggplot(aes(x=year_month, y=value))+
+            geom_line(aes(color=name)) +
+            labs(title='Iluminação Pública')
+iluminacao_publica_plot
+
+ggplotly(iluminacao_publica_plot)
+
+industrial_plot <- data_by_sector_N1 %>% 
+            ungroup() %>% 
+            filter(SetorN1 == 'Industrial') %>% 
+            pivot_longer(cols = data_by_sector_N1[,-c(1:2)] %>% names) %>% 
+            ggplot(aes(x=year_month, y=value))+
+            geom_line(aes(color=name)) +
+            labs(title='Industrial')
+industrial_plot
+ggplotly(industrial_plot)
+
+poder_publico_plot <-    data_by_sector_N1 %>% 
+            ungroup() %>% 
+            filter(SetorN1 == 'Poder Público') %>% 
+            pivot_longer(cols = data_by_sector_N1[,-c(1:2)] %>% names) %>% 
+            ggplot(aes(x=year_month, y=value))+
+            geom_line(aes(color=name)) +
+            labs(title='Poder Público')
+poder_publico_plot
+ggplotly(poder_publico_plot)
+
+residencial_plot <-    data_by_sector_N1 %>% 
+            ungroup() %>% 
+            filter(SetorN1 == 'Residencial') %>% 
+            pivot_longer(cols = data_by_sector_N1[,-c(1:2)] %>% names) %>% 
+            ggplot(aes(x=year_month, y=value))+
+            geom_line(aes(color=name)) +
+            labs(title='Residencial')
+
+residencial_plot
+ggplotly(residencial_plot)
+
+rural_plot <-    data_by_sector_N1 %>% 
+            ungroup() %>% 
+            filter(SetorN1 == 'Rural') %>% 
+            pivot_longer(cols = data_by_sector_N1[,-c(1:2)] %>% names) %>% 
+            ggplot(aes(x=year_month, y=value))+
+            geom_line(aes(color=name)) +
+            labs(title='Rural')
+
+rural_plot
+ggplotly(rural_plot)
+
+
+servico_publico_plot <-   data_by_sector_N1 %>% 
+            ungroup() %>% 
+            filter(SetorN1 == 'Serviço Público') %>% 
+            pivot_longer(cols = data_by_sector_N1[,-c(1:2)] %>% names) %>% 
+            ggplot(aes(x=year_month, y=value))+
+            geom_line(aes(color=name)) +
+            labs(title='Serviço Público')
+servico_publico_plot
+ggplotly(servico_publico_plot)
+
+
+```
+
+### Impact on IPCA
+
+```{r}
+data_by_sector_N1 %>%
+  group_by(year_month, SetorN1) %>%
+  select(setor_avg_12, total) %>%
+  ungroup() %>%
+  pivot_wider(names_from = SetorN1, 
+              values_from = c(total,setor_avg_12)) %>% 
+  drop_na() -> data_by_sector_N1.avg12
+```
+
+```{r}
+data_by_sector_N1.avg12 <- data_by_sector_N1.avg12 %>% left_join(ipca_consumption %>% select(year_month, valor))
+
+
+lm_consumption_ipca <- lm(valor ~ . -year_month, data_by_sector_N1.avg12)
+
+lm_consumption_ipca %>% test_linearfit()
+
+lm_consumption_ipca <- lm_consumption_ipca %>% step(k=step_wise_k)
+
+lm_consumption_ipca %>% test_linearfit()
+
+```
+### Impact on PIB
+
+#### Grouping by quarter
+
+
+```{r}
+data_by_sector_N1 %>% mutate(
+  quarter = yearquarter(year_month)
+) %>% 
+  group_by(quarter, SetorN1) %>% 
+  summarise(total=mean(total)) %>%
+  ungroup() %>% 
+  pivot_wider(names_from = 'SetorN1', values_from = total) -> data_by_sector_N1_quarter
+```
+
+#### Lagging values
+
+```{r}
+lag_cols_qtr <- c("Comercial","Consumo.Próprio","Iluminação.Pública","Industrial","Poder.Público","Residencial","Rural","Serviço.Público")
+
+data_by_sector_N1_quarter.l <- data.frame(data_by_sector_N1_quarter)
+
+
+
+
+data_by_sector_N1_quarter.l[,"Comercial"] <- data_by_sector_N1_quarter.l[,"Comercial"] %>% lag(1)
+data_by_sector_N1_quarter.l[,'Consumo.Próprio'] <- data_by_sector_N1_quarter.l[,'Consumo.Próprio'] %>% lag(1)
+data_by_sector_N1_quarter.l[,"Iluminação.Pública"] <- data_by_sector_N1_quarter.l[,"Iluminação.Pública"] %>% lag(1)
+data_by_sector_N1_quarter.l[,"Industrial"] <- data_by_sector_N1_quarter.l[,"Industrial"] %>% lag(1)
+data_by_sector_N1_quarter.l[,"Poder.Público"] <- data_by_sector_N1_quarter.l[,"Poder.Público"] %>% lag(1)
+data_by_sector_N1_quarter.l[,"Residencial"] <- data_by_sector_N1_quarter.l[,"Residencial"] %>% lag(1)
+data_by_sector_N1_quarter.l[,"Rural"] <- data_by_sector_N1_quarter.l[,"Rural"] %>% lag(1)
+data_by_sector_N1_quarter.l[,"Serviço.Público"] <- data_by_sector_N1_quarter.l[,"Serviço.Público"] %>% lag(1)
+
+data_by_sector_N1_quarter.l %>%
+  left_join(quarter_pib, c('quarter'='year')) %>% 
+  drop_na() -> consumption_pib_quarter
+
+
+consumption_pib_quarter
+```
+
+#### Testing impact on PIB
+
+```{r}
+lm_consumption_pib <- lm(pib ~ . -quarter, consumption_pib_quarter)
+
+lm_consumption_pib %>% test_linearfit()
+
+lm_consumption_pib.s <- lm_consumption_pib %>% step(k=step_wise_k)
+
+
+lm_consumption_pib.s %>% test_linearfit()
+
+```
+

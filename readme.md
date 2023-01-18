@@ -2,7 +2,12 @@
 
 This portfolio includes code from small projects until final projects for graduate classes and my MBA in Data Science and Analytics.
 
-## Deep Learning Projects
+
+## Data Science Projects
+
+- [**Impact of macroeconomic indicators on electricity consumption**](impact_of_macroeconomic_indicators_on_electricity_consumption): This is the final project for my MBA course in Data Science and Analytics, taken at Universidade de São Paulo (USP) from May 2021 to December 2022. This project aims to investigate the impacts of macroeconomic indicators on Brazil's power consumption.
+  
+### Deep Learning Projects
 
 - [**Bilingual models for better cross-lingual transfer**](./deep_learning_cross_lingual_transfer/): This is the final project for the post-graduation course class Introduction to Deep Learning in UNICAMP
   
