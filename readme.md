@@ -23,4 +23,4 @@ This portfolio includes code from small projects until final projects for gradua
 - [String Comparison](./string_comparison/): The project aimed to help find similar serial numbers in a bigger database – the output was intended to be analyzed by humans.
 
 ## Operational Research Projects
-- [Time Slot Allocation](./time_slot_allocation/): Small project uses some optimization ideas to maximize the number of people that can attend a meeting. The project can be extended to other scheduling problems
+- [Time Slot Allocation](./time_slot_allocation/): Small project uses some optimization ideas to maximize the number of people that can attend a meeting. The project can be extended to other scheduling problems.
