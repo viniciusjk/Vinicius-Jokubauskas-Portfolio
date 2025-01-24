@@ -1,4 +1,4 @@
-**Vinícius Jokubauskas**  
+## **Vinícius Jokubauskas**  
 **Email:** viniciusjk@outlook.com | **LinkedIn:** www.linkedin.com/in/vinicius-jokubauskas | **GitHub:** https://github.com/viniciusjk/ | **Location:** São Paulo, Brazil
 
 ---
